@@ -707,6 +707,17 @@ st.caption("Kedua berkas memuat kolom **Nama Teknisi**, **Cabang**, dan "
 # ---------------------------------------------------------------------------
 KATEGORI_ORDER = ['Interface', 'Normal', 'Mati Total', 'Promo', LABEL_LAINNYA]
 
+# Kolom penggajian pada sheet per cabang. Sembilan kolom potongan dikosongkan
+# untuk diisi finance; sisanya berisi rumus Excel yang ikut menyesuaikan.
+KOLOM_POTONGAN = ['Potongan Refund', 'Potongan AR', 'Potongan Kasbon', 'Keterlambatan',
+                  'Potongan Minus Audit', 'Potongan Audit Compliance',
+                  'Biaya Pendaftaran Koperasi', 'Simpanan Pokok', 'Simpanan Wajib']
+KOLOM_CADANGAN = ['Cadangan 7 Tahun / bulan', 'Cadangan 7 Tahun']
+KOLOM_RUMUS = ['Total Potongan', 'Gaji Teknisi', 'Nett Bagi hasil',
+               'Total Cadangan 7 Tahun']
+KOLOM_GAJI = (KOLOM_POTONGAN + ['Total Potongan', 'Gaji Teknisi', 'Nett Bagi hasil']
+              + KOLOM_CADANGAN + ['Total Cadangan 7 Tahun'])
+
 
 def _sheet_name(nama, terpakai):
     """Nama sheet Excel yang aman: <=31 karakter, tanpa karakter terlarang, unik."""
@@ -756,7 +767,26 @@ def rekap_kualifikasi(df, keys):
     return out.sort_values('Bagi Hasil (Aturan)', ascending=False).reset_index(drop=True)
 
 
-def _tulis_sheet(writer, df, nama_sheet, judul):
+def _rumus_gaji(df, r):
+    """Rumus Excel kolom penggajian untuk baris ke-r (1-indexed di worksheet)."""
+    from openpyxl.utils import get_column_letter as L
+
+    def kol(nama):
+        return L(df.columns.get_loc(nama) + 1)
+
+    return {
+        'Total Potongan':
+            f"=SUM({kol(KOLOM_POTONGAN[0])}{r}:{kol(KOLOM_POTONGAN[-1])}{r})",
+        'Gaji Teknisi':
+            f"={kol('Bagi Hasil (Aturan)')}{r}-{kol('Total Potongan')}{r}",
+        'Nett Bagi hasil':
+            f"={kol('Gaji Teknisi')}{r}-{kol('Cadangan 7 Tahun / bulan')}{r}",
+        'Total Cadangan 7 Tahun':
+            f"={kol('Cadangan 7 Tahun / bulan')}{r}+{kol('Cadangan 7 Tahun')}{r}",
+    }
+
+
+def _tulis_sheet(writer, df, nama_sheet, judul, kolom_gaji=False):
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
@@ -775,9 +805,13 @@ def _tulis_sheet(writer, df, nama_sheet, judul):
     head_font = Font(bold=True, color='FFFFFF', size=10)
     thin = Side(style='thin', color='D9D9D9')
 
+    isian_fill = PatternFill('solid', fgColor='B45309')      # coklat: diisi manual
+    rumus_fill = PatternFill('solid', fgColor='166534')       # hijau: rumus otomatis
     for j, kol in enumerate(df.columns, start=1):
         c = ws.cell(row=4, column=j)
-        c.fill, c.font = head_fill, head_font
+        c.font = head_font
+        c.fill = (isian_fill if kol in (KOLOM_POTONGAN + KOLOM_CADANGAN)
+                  else rumus_fill if kol in KOLOM_RUMUS else head_fill)
         c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         c.border = Border(bottom=Side(style='medium', color='1F3864'))
         lebar = max(len(str(kol)) + 2,
@@ -785,7 +819,8 @@ def _tulis_sheet(writer, df, nama_sheet, judul):
         ws.column_dimensions[get_column_letter(j)].width = min(max(lebar, 10), 34)
 
     kol_rp = [c for c in df.columns
-              if c.startswith(('Omzet', 'Bagi Hasil')) or c in (lbl_flat, 'Selisih')]
+              if c.startswith(('Omzet', 'Bagi Hasil')) or c in (lbl_flat, 'Selisih')
+              or c in KOLOM_GAJI]
     idx_rp = [df.columns.get_loc(c) + 1 for c in kol_rp]
     idx_baris = (df.columns.get_loc('Baris') + 1) if 'Baris' in df.columns else None
     idx_pct = (df.columns.get_loc('Efektif %') + 1) if 'Efektif %' in df.columns else None
@@ -803,6 +838,13 @@ def _tulis_sheet(writer, df, nama_sheet, judul):
             ws.cell(row=r, column=idx_pct).number_format = '0.0'
         for j in range(1, n_kol + 1):
             ws.cell(row=r, column=j).border = Border(bottom=thin)
+        if kolom_gaji:
+            for kol in KOLOM_POTONGAN + KOLOM_CADANGAN:
+                ws.cell(row=r, column=df.columns.get_loc(kol) + 1).fill = \
+                    PatternFill('solid', fgColor='FFF8E1')
+            for kol, rumus in _rumus_gaji(df, r).items():
+                sel = ws.cell(row=r, column=df.columns.get_loc(kol) + 1, value=rumus)
+                sel.number_format = '#,##0'
 
     # baris TOTAL
     if n_baris:
@@ -861,8 +903,10 @@ def buat_excel(df_sumber):
                 continue
             dc = rekap_kualifikasi(sub, ['TEKNISI']).copy()
             dc.insert(1, 'Cabang', cab)
+            for kol in KOLOM_GAJI:
+                dc[kol] = pd.NA
             _tulis_sheet(writer, dc, _sheet_name(cab, terpakai),
-                         f'Bagi Hasil Teknisi — Cabang {cab}')
+                         f'Bagi Hasil Teknisi — Cabang {cab}', kolom_gaji=True)
     buf.seek(0)
     return buf.getvalue()
 
@@ -873,7 +917,11 @@ with st.container():
         "Berisi kolom **Nama Teknisi**, **Cabang**, **Omzet**, rincian kualifikasi "
         "**Interface / Normal / Mati Total / Promo / Lainnya** (omzet & bagi hasil "
         "masing-masing), serta **Bagi Hasil**. Sheet: rekap gabungan, rekap per teknisi, "
-        "rekap per cabang, lalu satu sheet untuk tiap cabang."
+        "rekap per cabang, lalu satu sheet untuk tiap cabang.\n\n"
+        "Sheet per cabang ditambah kolom penggajian: sembilan kolom potongan "
+        "(header **coklat** = diisi manual) plus Total Potongan, Gaji Teknisi, "
+        "Nett Bagi Hasil, dan Total Cadangan 7 Tahun (header **hijau** = rumus Excel, "
+        "ikut berubah begitu potongannya diisi)."
     )
     if st.button("🧾 Siapkan berkas Excel", key='siap_xlsx', use_container_width=True):
         with st.spinner("Menyusun workbook..."):
