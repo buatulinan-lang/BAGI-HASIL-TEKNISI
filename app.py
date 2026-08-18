@@ -452,6 +452,193 @@ st.caption("Kedua berkas memuat kolom **Nama Teknisi**, **Cabang**, dan "
            "**Bagi Hasil (Aturan)**, ditambah omzet, pembanding, dan selisihnya.")
 
 # ---------------------------------------------------------------------------
+# Unduhan Excel (multi-sheet: rekap + satu sheet per cabang)
+# ---------------------------------------------------------------------------
+KATEGORI_ORDER = ['Interface', 'Normal', 'Mati Total', 'Promo', LABEL_LAINNYA]
+
+
+def _sheet_name(nama, terpakai):
+    """Nama sheet Excel yang aman: <=31 karakter, tanpa karakter terlarang, unik."""
+    s = str(nama)
+    for ch in '[]:*?/\\':
+        s = s.replace(ch, '-')
+    s = s.strip() or 'Cabang'
+    s = s[:31]
+    dasar, n = s, 2
+    while s.lower() in terpakai:
+        akhiran = f"_{n}"
+        s = dasar[:31 - len(akhiran)] + akhiran
+        n += 1
+    terpakai.add(s.lower())
+    return s
+
+
+def rekap_kualifikasi(df, keys):
+    """Rekap omzet & bagi hasil, dipecah per kualifikasi (Interface/Normal/Mati Total/...)."""
+    base = (df.groupby(keys, as_index=False)
+              .agg(Baris=('TOTAL HARGA', 'size'),
+                   Omzet=('TOTAL HARGA', 'sum'),
+                   BH=('BAGI_HASIL', 'sum'),
+                   Flat=('FLAT', 'sum')))
+
+    def _pivot(nilai, prefix):
+        p = df.pivot_table(index=keys, columns='TARIF_LABEL', values=nilai,
+                           aggfunc='sum', fill_value=0.0)
+        for k in KATEGORI_ORDER:
+            if k not in p.columns:
+                p[k] = 0.0
+        p = p[KATEGORI_ORDER]
+        p.columns = [f"{prefix} {k}" for k in KATEGORI_ORDER]
+        return p.reset_index()
+
+    out = (base.merge(_pivot('TOTAL HARGA', 'Omzet'), on=keys, how='left')
+               .merge(_pivot('BAGI_HASIL', 'Bagi Hasil'), on=keys, how='left'))
+    out['Selisih'] = out['BH'] - out['Flat']
+    out['Efektif %'] = (out['BH'] / out['Omzet'].replace(0, pd.NA) * 100).round(1)
+
+    urut = list(keys) + ['Baris'] \
+        + [f"Omzet {k}" for k in KATEGORI_ORDER] + ['Omzet'] \
+        + [f"Bagi Hasil {k}" for k in KATEGORI_ORDER] + ['BH', 'Flat', 'Selisih', 'Efektif %']
+    out = out[urut].rename(columns={
+        'TEKNISI': 'Nama Teknisi', 'CABANG': 'Cabang',
+        'Omzet': 'Omzet Jasa (Total)', 'BH': 'Bagi Hasil (Aturan)', 'Flat': lbl_flat})
+    return out.sort_values('Bagi Hasil (Aturan)', ascending=False).reset_index(drop=True)
+
+
+def _tulis_sheet(writer, df, nama_sheet, judul):
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    df.to_excel(writer, sheet_name=nama_sheet, index=False, startrow=3)
+    ws = writer.sheets[nama_sheet]
+
+    ws.cell(row=1, column=1, value=judul).font = Font(bold=True, size=13, color='1F3864')
+    ws.cell(row=2, column=1,
+            value=f"Periode: {periode_txt} · Tarif: "
+                  + ", ".join(f"{k} {v:.0f}%" for k, v in tarif_input.items())
+                  + f", Lainnya {tarif_lain:.0f}%, pembanding flat {tarif_flat:.0f}%"
+            ).font = Font(size=9, italic=True, color='555555')
+
+    n_baris, n_kol = len(df), len(df.columns)
+    head_fill = PatternFill('solid', fgColor='1F3864')
+    head_font = Font(bold=True, color='FFFFFF', size=10)
+    thin = Side(style='thin', color='D9D9D9')
+
+    for j, kol in enumerate(df.columns, start=1):
+        c = ws.cell(row=4, column=j)
+        c.fill, c.font = head_fill, head_font
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        c.border = Border(bottom=Side(style='medium', color='1F3864'))
+        lebar = max(len(str(kol)) + 2,
+                    (df[kol].astype(str).str.len().max() if n_baris else 0) + 2)
+        ws.column_dimensions[get_column_letter(j)].width = min(max(lebar, 10), 34)
+
+    kol_rp = [c for c in df.columns
+              if c.startswith(('Omzet', 'Bagi Hasil')) or c in (lbl_flat, 'Selisih')]
+    idx_rp = [df.columns.get_loc(c) + 1 for c in kol_rp]
+    idx_baris = (df.columns.get_loc('Baris') + 1) if 'Baris' in df.columns else None
+    idx_pct = (df.columns.get_loc('Efektif %') + 1) if 'Efektif %' in df.columns else None
+
+    for i in range(n_baris):
+        r = 5 + i
+        if i % 2 == 1:
+            for j in range(1, n_kol + 1):
+                ws.cell(row=r, column=j).fill = PatternFill('solid', fgColor='F4F7FB')
+        for j in idx_rp:
+            ws.cell(row=r, column=j).number_format = '#,##0'
+        if idx_baris:
+            ws.cell(row=r, column=idx_baris).number_format = '#,##0'
+        if idx_pct:
+            ws.cell(row=r, column=idx_pct).number_format = '0.0'
+        for j in range(1, n_kol + 1):
+            ws.cell(row=r, column=j).border = Border(bottom=thin)
+
+    # baris TOTAL
+    if n_baris:
+        rt = 5 + n_baris
+        ws.cell(row=rt, column=1, value='TOTAL')
+        for j in range(1, n_kol + 1):
+            c = ws.cell(row=rt, column=j)
+            c.font = Font(bold=True)
+            c.fill = PatternFill('solid', fgColor='DCE6F1')
+            c.border = Border(top=Side(style='medium', color='1F3864'))
+        for j in idx_rp + ([idx_baris] if idx_baris else []):
+            L = get_column_letter(j)
+            c = ws.cell(row=rt, column=j, value=f"=SUM({L}5:{L}{rt-1})")
+            c.number_format = '#,##0'
+            c.font = Font(bold=True)
+        if idx_pct and 'Bagi Hasil (Aturan)' in df.columns:
+            Lb = get_column_letter(df.columns.get_loc('Bagi Hasil (Aturan)') + 1)
+            Lo = get_column_letter(df.columns.get_loc('Omzet Jasa (Total)') + 1)
+            c = ws.cell(row=rt, column=idx_pct,
+                        value=f"=IF({Lo}{rt}=0,0,{Lb}{rt}/{Lo}{rt}*100)")
+            c.number_format = '0.0'
+            c.font = Font(bold=True)
+
+    ws.freeze_panes = ws.cell(row=5, column=1)
+    if n_baris:
+        ws.auto_filter.ref = f"A4:{get_column_letter(n_kol)}{4 + n_baris}"
+
+
+def buat_excel(df_sumber):
+    """Workbook: Ringkasan + Rekap Teknisi & Cabang + Rekap per Cabang + sheet per cabang."""
+    buf = io.BytesIO()
+
+    # normalisasi kunci supaya tidak ada baris yang hilang saat groupby
+    d = df_sumber.copy()
+    d['TEKNISI'] = (d['TEKNISI'].fillna('TIDAK ADA TEKNISI').astype(str).str.strip()
+                    .replace({'': 'TIDAK ADA TEKNISI', 'nan': 'TIDAK ADA TEKNISI',
+                              'NaN': 'TIDAK ADA TEKNISI', 'None': 'TIDAK ADA TEKNISI'}))
+    d['CABANG'] = (d['CABANG'].fillna('(TANPA CABANG)').astype(str).str.strip()
+                   .replace({'': '(TANPA CABANG)', 'nan': '(TANPA CABANG)'}))
+
+    rek_all = rekap_kualifikasi(d, ['TEKNISI', 'CABANG'])
+    rek_cab = rekap_kualifikasi(d, ['CABANG'])
+    rek_tek = rekap_kualifikasi(d, ['TEKNISI'])
+
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        _tulis_sheet(writer, rek_all, 'Rekap Teknisi & Cabang',
+                     'Rekap Bagi Hasil per Teknisi & Cabang')
+        _tulis_sheet(writer, rek_tek, 'Rekap Teknisi',
+                     'Rekap Bagi Hasil per Teknisi (gabungan semua cabang)')
+        _tulis_sheet(writer, rek_cab, 'Rekap Cabang', 'Rekap Bagi Hasil per Cabang')
+
+        terpakai = {'rekap teknisi & cabang', 'rekap teknisi', 'rekap cabang'}
+        for cab in sorted(d['CABANG'].unique()):
+            sub = d[d['CABANG'] == cab]
+            if sub.empty:
+                continue
+            dc = rekap_kualifikasi(sub, ['TEKNISI']).copy()
+            dc.insert(1, 'Cabang', cab)
+            _tulis_sheet(writer, dc, _sheet_name(cab, terpakai),
+                         f'Bagi Hasil Teknisi — Cabang {cab}')
+    buf.seek(0)
+    return buf.getvalue()
+
+
+with st.container():
+    st.markdown("##### 📊 Unduh Excel (multi-sheet per cabang)")
+    st.caption(
+        "Berisi kolom **Nama Teknisi**, **Cabang**, **Omzet**, rincian kualifikasi "
+        "**Interface / Normal / Mati Total / Promo / Lainnya** (omzet & bagi hasil "
+        "masing-masing), serta **Bagi Hasil**. Sheet: rekap gabungan, rekap per teknisi, "
+        "rekap per cabang, lalu satu sheet untuk tiap cabang."
+    )
+    if st.button("🧾 Siapkan berkas Excel", key='siap_xlsx', use_container_width=True):
+        with st.spinner("Menyusun workbook..."):
+            st.session_state['xlsx_bytes'] = buat_excel(jasa_tampil)
+            st.session_state['xlsx_tag'] = tag_file
+    if st.session_state.get('xlsx_bytes') is not None:
+        st.download_button(
+            "⬇️ Unduh Excel (.xlsx)",
+            data=st.session_state['xlsx_bytes'],
+            file_name=f"bagi_hasil_teknisi_{st.session_state.get('xlsx_tag', tag_file)}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, key='unduh_xlsx')
+
+
+
+# ---------------------------------------------------------------------------
 # Grafik & rekap pendukung
 # ---------------------------------------------------------------------------
 g1, g2 = st.columns([1.15, 1])
