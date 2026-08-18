@@ -40,7 +40,9 @@ LABEL_LAINNYA = 'Lainnya'
 
 # Teknisi dengan kesepakatan tarif berbeda dari tarif umum.
 # Kolom kosong (None) berarti mengikuti tarif umum untuk kualifikasi itu.
-NAMA_TARIF_RATA_20 = [
+# Kelompok pertama: Interface 20%, Normal 20%, Mati Total 22%, Lainnya 20%,
+# Promo ikut tarif umum.
+NAMA_TARIF_TETAP_20 = [
     'M IBNU SIDIK', 'RAFI ALAMSYAH', 'MIFTAHUL MUTTAQIEN', 'BRYAN PUTRA',
     'HAMZAH MAULANA', 'DAVID SONDAKH', 'FATHUR ROHMAN SOBARNA', 'ALAI ARKAN',
     'ALFIN DAMARA', 'ADI FIRDAUS', 'M IQBAL PRADANA', 'IRSYAD PANCA GUNAWAN',
@@ -55,8 +57,8 @@ KOL_TARIF_KHUSUS = ['Nama Teknisi', 'Interface', 'Normal', 'Mati Total', 'Promo'
 
 def tarif_khusus_awal():
     baris = [{'Nama Teknisi': n, 'Interface': 20.0, 'Normal': 20.0,
-              'Mati Total': 20.0, 'Promo': 20.0, 'Lainnya': 20.0}
-             for n in NAMA_TARIF_RATA_20]
+              'Mati Total': 22.0, 'Promo': None, 'Lainnya': 20.0}
+             for n in NAMA_TARIF_TETAP_20]
     baris += [{'Nama Teknisi': n, 'Interface': None, 'Normal': 35.5,
                'Mati Total': 37.5, 'Promo': None, 'Lainnya': None}
               for n in NAMA_TARIF_NORMAL_355]
