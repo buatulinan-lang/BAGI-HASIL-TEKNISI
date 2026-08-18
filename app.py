@@ -1017,6 +1017,265 @@ def buat_excel(df_sumber):
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Slip gaji PDF per cabang
+# ---------------------------------------------------------------------------
+DIR_ASET = Path(__file__).parent / "assets"
+LOGO_MADINAH = DIR_ASET / "logo-madinah.png"
+LOGO_MFLASH = DIR_ASET / "logo-mflash.png"
+
+# baris potongan pada slip -> kolom Excel yang dijumlahkan
+PETA_POTONGAN_SLIP = [
+    ('Potongan Kasbon', ['Potongan Kasbon']),
+    ('Potongan Refund', ['Potongan Refund']),
+    ('Potongan AR', ['Potongan AR']),
+    ('Potongan Terlambat', ['Keterlambatan']),
+    ('Potongan Minus Audit', ['Potongan Minus Audit']),
+    ('Potongan Audit Compliance', ['Potongan Audit Compliance']),
+    ('Potongan Koperasi', ['Biaya Pendaftaran Koperasi', 'Simpanan Pokok',
+                           'Simpanan Wajib']),
+]
+
+
+def rupiah(v) -> str:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        v = 0.0
+    s = f"{abs(v):,.0f}".replace(",", ".")
+    return ("Rp (" + s + ")") if v < 0 else ("Rp " + s)
+
+
+@st.cache_data(show_spinner="Membaca berkas potongan...")
+def baca_potongan(isi: bytes):
+    """Ambil nilai potongan dari Excel hasil unduhan yang sudah diisi finance.
+
+    -> {(CABANG, NAMA TEKNISI): {nama_kolom: nilai}}
+    """
+    hasil, terbaca = {}, 0
+    xls = pd.ExcelFile(io.BytesIO(isi), engine='openpyxl')
+    for sheet in xls.sheet_names:
+        try:
+            d = xls.parse(sheet, header=3)
+        except Exception:                                     # noqa: BLE001
+            continue
+        if 'Nama Teknisi' not in d.columns or 'Cabang' not in d.columns:
+            continue
+        if not any(k in d.columns for k in KOLOM_POTONGAN):
+            continue
+        d = d[d['Nama Teknisi'].notna() & (d['Nama Teknisi'].astype(str) != 'TOTAL')]
+        for _, r in d.iterrows():
+            kunci = (str(r['Cabang']).strip().upper(),
+                     str(r['Nama Teknisi']).strip().upper())
+            isi_baris = {}
+            for kol in KOLOM_POTONGAN + KOLOM_CADANGAN:
+                v = r.get(kol)
+                isi_baris[kol] = 0.0 if v is None or pd.isna(v) else float(v)
+            hasil[kunci] = isi_baris
+            terbaca += 1
+    return hasil, terbaca
+
+
+def _baris_slip(sub, potongan, persen_cadangan):
+    """Susun angka satu slip dari transaksi seorang teknisi di satu cabang."""
+    per_kual = []
+    for lbl in KATEGORI_ORDER:
+        s = sub[sub['TARIF_LABEL'] == lbl]
+        if s.empty or s['TOTAL HARGA'].sum() == 0:
+            continue
+        omzet, bh = s['TOTAL HARGA'].sum(), s['BAGI_HASIL'].sum()
+        per_kual.append((lbl, omzet, bh / omzet if omzet else 0.0, bh))
+    bruto = sum(x[3] for x in per_kual)
+
+    pot = []
+    for label, kolom in PETA_POTONGAN_SLIP:
+        pot.append((label, sum(float(potongan.get(k, 0) or 0) for k in kolom)))
+    total_pot = sum(x[1] for x in pot)
+
+    nett = bruto - total_pot
+    cadangan = nett * persen_cadangan / 100.0
+    total_tabungan = float(potongan.get('Cadangan 7 Tahun', 0) or 0) + cadangan
+    return per_kual, bruto, pot, total_pot, nett, cadangan, total_tabungan
+
+
+def _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka, persen_cadangan,
+                 catatan):
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    per_kual, bruto, pot, total_pot, nett, cadangan, total_tabungan = angka
+    m = 18 * mm
+    y = tinggi - 14 * mm
+
+    if LOGO_MADINAH.exists():
+        c.drawImage(ImageReader(str(LOGO_MADINAH)), m, y - 20 * mm, width=20 * mm,
+                    height=20 * mm, mask='auto')
+    if LOGO_MFLASH.exists():
+        c.drawImage(ImageReader(str(LOGO_MFLASH)), lebar - m - 34 * mm, y - 20 * mm,
+                    width=34 * mm, height=24 * mm, mask='auto',
+                    preserveAspectRatio=True, anchor='ne')
+    y -= 26 * mm
+
+    c.setFillColorRGB(0.12, 0.22, 0.39)
+    c.setFont('Helvetica-Bold', 13)
+    c.drawCentredString(lebar / 2, y, 'SLIP BAGI HASIL TEKNISI MADINAH FLASH')
+    y -= 4 * mm
+    c.setLineWidth(1.2)
+    c.line(m, y, lebar - m, y)
+    y -= 9 * mm
+
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont('Helvetica', 9.5)
+    for label, isi in [('Nama', nama), ('Jabatan', 'Teknisi'),
+                       ('Divisi', f'MFlash — {cabang}'), ('Periode', periode)]:
+        c.setFont('Helvetica-Bold', 9.5)
+        c.drawString(m, y, label)
+        c.setFont('Helvetica', 9.5)
+        c.drawString(m + 24 * mm, y, f': {isi}')
+        y -= 5.4 * mm
+    y -= 3 * mm
+
+    def judul_tabel(teks, kolom_kanan=True):
+        nonlocal y
+        c.setFillColorRGB(0.12, 0.22, 0.39)
+        c.rect(m, y - 5.6 * mm, lebar - 2 * m, 5.6 * mm, stroke=0, fill=1)
+        c.setFillColorRGB(1, 1, 1)
+        c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(m + 2 * mm, y - 4 * mm, teks)
+        if kolom_kanan:
+            c.drawRightString(lebar - m - 46 * mm, y - 4 * mm, 'OMZET')
+            c.drawRightString(lebar - m - 30 * mm, y - 4 * mm, 'AKAD')
+            c.drawRightString(lebar - m - 2 * mm, y - 4 * mm, 'BAGI HASIL')
+        else:
+            c.drawRightString(lebar - m - 2 * mm, y - 4 * mm, 'JUMLAH')
+        c.setFillColorRGB(0, 0, 0)
+        y -= 9 * mm
+
+    judul_tabel('PENDAPATAN PER KUALIFIKASI')
+    c.setFont('Helvetica', 9)
+    if not per_kual:
+        c.drawString(m + 2 * mm, y, '(tidak ada transaksi jasa pada periode ini)')
+        y -= 5.4 * mm
+    for lbl, omzet, akad, bh in per_kual:
+        c.drawString(m + 2 * mm, y, lbl)
+        c.drawRightString(lebar - m - 46 * mm, y, rupiah(omzet))
+        c.drawRightString(lebar - m - 30 * mm, y,
+                          f'{akad*100:.1f}'.replace('.', ',') + '%')
+        c.drawRightString(lebar - m - 2 * mm, y, rupiah(bh))
+        y -= 5.4 * mm
+
+    y -= 1 * mm
+    c.setLineWidth(0.6)
+    c.line(lebar - m - 52 * mm, y + 1.5 * mm, lebar - m, y + 1.5 * mm)
+    y -= 3 * mm
+    c.setFont('Helvetica-Bold', 9.5)
+    c.drawString(m + 2 * mm, y, 'Total Bruto Bagi Hasil')
+    c.drawRightString(lebar - m - 2 * mm, y, rupiah(bruto))
+    y -= 9 * mm
+
+    judul_tabel('POTONGAN', kolom_kanan=False)
+    c.setFont('Helvetica', 9)
+    for label, nilai in pot:
+        c.drawString(m + 2 * mm, y, label)
+        c.drawRightString(lebar - m - 2 * mm, y, rupiah(nilai))
+        y -= 5.4 * mm
+    c.setLineWidth(0.6)
+    c.line(lebar - m - 52 * mm, y + 1.5 * mm, lebar - m, y + 1.5 * mm)
+    y -= 3 * mm
+    c.setFont('Helvetica-Bold', 9.5)
+    c.drawString(m + 2 * mm, y, 'Total Potongan')
+    c.drawRightString(lebar - m - 2 * mm, y, rupiah(total_pot))
+    y -= 9 * mm
+
+    c.setFillColorRGB(0.86, 0.92, 0.84)
+    c.rect(m, y - 3 * mm, lebar - 2 * m, 8 * mm, stroke=0, fill=1)
+    c.setFillColorRGB(0.05, 0.35, 0.15)
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(m + 2 * mm, y, 'NETT BAGI HASIL')
+    c.drawRightString(lebar - m - 2 * mm, y, rupiah(nett))
+    c.setFillColorRGB(0, 0, 0)
+    y -= 12 * mm
+
+    judul_tabel('TABUNGAN RUMAH TEKNISI', kolom_kanan=False)
+    c.setFont('Helvetica', 9)
+    c.drawString(m + 2 * mm, y,
+                 'Cadangan Tabungan Rumah periode ini ('
+                 + f'{persen_cadangan:g}'.replace('.', ',') + '% dari nett)')
+    c.drawRightString(lebar - m - 2 * mm, y, rupiah(cadangan))
+    y -= 5.4 * mm
+    c.setFont('Helvetica-Bold', 9)
+    c.drawString(m + 2 * mm, y, 'Total Tabungan Rumah Teknisi')
+    c.drawRightString(lebar - m - 2 * mm, y, rupiah(total_tabungan))
+    y -= 11 * mm
+
+    c.setFont('Helvetica-Bold', 8.5)
+    c.drawString(m, y, 'Catatan')
+    y -= 3 * mm
+    tinggi_kotak = 20 * mm
+    c.setLineWidth(0.6)
+    c.setStrokeColorRGB(0.7, 0.7, 0.7)
+    c.rect(m, y - tinggi_kotak, lebar - 2 * m, tinggi_kotak, stroke=1, fill=0)
+    c.setFont('Helvetica', 8.5)
+    baris_catatan = str(catatan or '').splitlines()
+    yy = y - 5 * mm
+    for baris in baris_catatan[:5]:
+        c.drawString(m + 2 * mm, yy, baris[:110])
+        yy -= 4.2 * mm
+    y -= tinggi_kotak + 12 * mm
+
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setFont('Helvetica', 8.5)
+    for x, teks in ((m + 8 * mm, 'Teknisi'),
+                    (lebar / 2 - 12 * mm, 'Kepala Cabang'),
+                    (lebar - m - 40 * mm, 'Finance')):
+        c.line(x, y, x + 32 * mm, y)
+        c.drawCentredString(x + 16 * mm, y - 4.5 * mm, teks)
+
+
+def buat_pdf_cabang(df_cabang, cabang, potongan, persen_cadangan, catatan, periode):
+    """Satu PDF berisi slip semua teknisi di satu cabang, satu slip per halaman."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    buf = io.BytesIO()
+    lebar, tinggi = A4
+    c = rl_canvas.Canvas(buf, pagesize=A4)
+    c.setTitle(f'Slip Bagi Hasil — {cabang}')
+    nama_teknisi = sorted(df_cabang['TEKNISI'].unique())
+    for nama in nama_teknisi:
+        sub = df_cabang[df_cabang['TEKNISI'] == nama]
+        pot = potongan.get((str(cabang).strip().upper(), str(nama).strip().upper()), {})
+        angka = _baris_slip(sub, pot, persen_cadangan)
+        _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka,
+                     persen_cadangan, catatan)
+        c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue(), len(nama_teknisi)
+
+
+def buat_zip_slip(df_sumber, potongan, persen_cadangan, catatan, periode):
+    """ZIP berisi satu PDF per cabang."""
+    import zipfile
+
+    d = df_sumber.copy()
+    d['CABANG'] = d['CABANG'].astype(str).str.strip()
+    buf = io.BytesIO()
+    ringkas = []
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        for cab in sorted(d['CABANG'].unique()):
+            sub = d[d['CABANG'] == cab]
+            if sub.empty:
+                continue
+            isi, n = buat_pdf_cabang(sub, cab, potongan, persen_cadangan,
+                                     catatan, periode)
+            aman = re.sub(r'[^A-Za-z0-9 _-]', '-', cab).strip() or 'CABANG'
+            z.writestr(f'{aman}.pdf', isi)
+            ringkas.append({'Cabang': cab, 'Slip': n})
+    buf.seek(0)
+    return buf.getvalue(), pd.DataFrame(ringkas)
+
+
 with st.container():
     st.markdown("##### 📊 Unduh Excel (multi-sheet per cabang)")
     st.caption(
@@ -1040,6 +1299,66 @@ with st.container():
             file_name=f"bagi_hasil_teknisi_{st.session_state.get('xlsx_tag', tag_file)}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True, key='unduh_xlsx')
+
+
+with st.container():
+    st.markdown("##### 🧾 Unduh Slip Gaji PDF (ZIP, satu PDF per cabang)")
+    st.caption(
+        "Setiap teknisi satu halaman: pendapatan dirinci per kualifikasi lengkap "
+        "dengan persen akad-nya, lalu potongan, Nett Bagi Hasil, dan tabungan rumah. "
+        "Nilai potongan diambil dari berkas Excel yang sudah Anda isi — unduh Excel di "
+        "atas, isi kolom potongan di sheet tiap cabang, lalu upload kembali di sini."
+    )
+
+    sp1, sp2 = st.columns([2, 1])
+    with sp1:
+        up_pot = st.file_uploader(
+            "Excel potongan yang sudah diisi (opsional)", type=['xlsx'],
+            key='up_potongan',
+            help="Berkas hasil tombol Unduh Excel di atas, setelah kolom potongan diisi. "
+                 "Kalau dikosongkan, semua potongan dianggap nol.")
+    with sp2:
+        persen_cadangan = st.number_input(
+            "Cadangan tabungan rumah (% dari nett)", 0.0, 100.0, 5.0, 0.5,
+            key='persen_cadangan')
+
+    catatan_slip = st.text_area(
+        "Catatan yang dicetak di setiap slip", value="", key='catatan_slip',
+        height=70, placeholder="mis. Slip ini sah tanpa tanda tangan basah.")
+
+    potongan = {}
+    if up_pot is not None:
+        try:
+            potongan, n_pot = baca_potongan(up_pot.getvalue())
+            st.success(f"Potongan terbaca untuk {n_pot:,} baris teknisi.")
+        except Exception as e:                                   # noqa: BLE001
+            st.error(f"Berkas potongan tidak terbaca: {e}")
+    else:
+        st.info("Belum ada berkas potongan — semua potongan dicetak Rp 0.")
+
+    if st.button("🧾 Siapkan slip gaji PDF", key='siap_pdf', use_container_width=True):
+        with st.spinner("Menyusun slip per cabang..."):
+            try:
+                isi, ringkas = buat_zip_slip(jasa_tampil, potongan, persen_cadangan,
+                                             catatan_slip, periode_txt)
+                st.session_state['zip_slip'] = isi
+                st.session_state['zip_tag'] = tag_file
+                st.session_state['ringkas_slip'] = ringkas
+            except ModuleNotFoundError:
+                st.error("Paket **reportlab** belum terpasang. Tambahkan `reportlab` "
+                         "ke requirements.txt lalu deploy ulang.")
+
+    if st.session_state.get('zip_slip') is not None:
+        st.download_button(
+            "⬇️ Unduh slip gaji (.zip)",
+            data=st.session_state['zip_slip'],
+            file_name=f"slip_bagi_hasil_{st.session_state.get('zip_tag', tag_file)}.zip",
+            mime="application/zip", use_container_width=True, key='unduh_zip')
+        rs = st.session_state.get('ringkas_slip')
+        if rs is not None and len(rs):
+            st.caption(f"{int(rs['Slip'].sum()):,} slip di {len(rs)} cabang.")
+            with st.expander("Rincian jumlah slip per cabang"):
+                st.dataframe(rs, hide_index=True, use_container_width=True)
 
 
 
