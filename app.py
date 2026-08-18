@@ -11,6 +11,7 @@ Jalankan:
     streamlit run app.py
 """
 import io
+import re
 from datetime import date
 from pathlib import Path
 
@@ -140,46 +141,197 @@ def daftar_periode_gaji(tgl_min, tgl_max):
 
 
 SALES_REQUIRED = ['TGL FAKTUR', 'NO FAKTUR', 'KATEGORI BARANG', 'NAMA BARANG',
-                  'QTY', 'TOTAL HARGA', 'CABANG']
+                  'QTY', 'TOTAL HARGA']          # CABANG boleh datang dari nama berkas
+KOLOM_DIPAKAI = SALES_REQUIRED + ['CABANG', 'NAMA TEKNISI', 'NAMA TEKNISI (FINAL)']
+# NO FAKTUR hanya unik DI DALAM satu cabang (nomor MF-FP.xxxx dipakai ulang di
+# cabang lain), jadi kunci duplikat wajib menyertakan CABANG. Baris kembar di
+# dalam satu berkas tetap dipertahankan — yang dibuang hanya kiriman ulang.
+KUNCI_DUPLIKAT = ['CABANG', 'NO FAKTUR', 'NAMA BARANG', 'QTY', 'TOTAL HARGA',
+                  'TGL FAKTUR']
+LABEL_TANPA_CABANG = '(TANPA CABANG)'
+
+# Daftar cabang resmi. Nama berkas kiriman cabang biasanya terpotong
+# (mis. "001mflashklende") sehingga dicocokkan lewat awalan ke daftar ini.
+CABANG_KANONIK = [
+    'BINTARA', 'CEGER', 'CIBINONG', 'CIBUBUR', 'CIKAMPEK', 'CILANGKAP', 'CINERE',
+    'CONDET', 'DRAMAGA', 'JATIBENING', 'JATIMULYA', 'JATIWARINGIN', 'KARAWANG',
+    'KLENDER', 'PEJATEN', 'RADJIMAN', 'SAWANGAN', 'WARBONG',
+]
+# nama lain -> nama cabang resmi
+ALIAS_CABANG_AWAL = {'TELUK JAMBE': 'KARAWANG', 'TELUKJAMBE': 'KARAWANG'}
+
+# potongan kata yang dibuang saat menebak nama cabang
+NOISE_NAMA = {
+    'RINCIAN', 'PENJUALAN', 'PENJUALANAN', 'DATA', 'LAPORAN', 'LAP', 'REKAP', 'JASA',
+    'SALES', 'FAKTUR', 'INVOICE', 'PERIODE', 'BULAN', 'TAHUN', 'CABANG', 'CAB',
+    'BRANCH', 'TOKO', 'FIX', 'FINAL', 'REVISI', 'REV', 'UPDATE', 'BARU', 'NEW',
+    'COPY', 'SALINAN', 'XLSX', 'XLS', 'CSV', 'GZ', 'FILE', 'BAGI', 'HASIL',
+    'TEKNISI', 'OK', 'SHEET', 'LEMBAR', 'TABEL', 'TABLE',
+    'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI', 'JULI', 'AGUSTUS',
+    'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER',
+    'JAN', 'FEB', 'MAR', 'APR', 'JUN', 'JUL', 'AGU', 'AGS', 'SEP', 'OKT', 'NOV', 'DES',
+}
+AWALAN_BUANG = ('MFLASH', 'MFLSH', 'MFLAS')      # kode perusahaan di nama berkas
 
 
-@st.cache_data(show_spinner="Membaca data penjualan...")
-def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
-    if source_kind == 'csv_gz':
-        df = pd.read_csv(io.BytesIO(file_bytes), compression='gzip')
-    elif source_kind == 'csv':
-        df = pd.read_csv(io.BytesIO(file_bytes))
+def _huruf(s) -> str:
+    return re.sub(r'[^A-Z]', '', str(s).upper())
+
+
+def token_cabang(nama: str) -> str:
+    """Sisa nama berkas/sheet setelah angka, kode, dan kata umum dibuang.
+
+    'rincian_faktur_penjualan_001mflashklende_260818094705.xlsx' -> 'KLENDE'
+    'Rincian Faktur Penjualan' -> '' (semuanya kata umum)
+    """
+    s = re.sub(r'\.(xlsx|xlsm|xls|csv|gz|txt)$', '', str(nama), flags=re.I)
+    s = re.sub(r'\.(csv|xlsx)$', '', s, flags=re.I)              # untuk nama .csv.gz
+    s = re.sub(r'\b[0-9a-f]{8,}\b', ' ', s, flags=re.I)          # buang kode acak/uuid
+    s = re.sub(r'[\_\-\.\(\)\[\]#]+', ' ', s)
+    s = re.sub(r'\d+', ' ', s)
+    tok = []
+    for t in s.upper().split():
+        for aw in AWALAN_BUANG:
+            if t.startswith(aw) and len(t) > len(aw):
+                t = t[len(aw):]
+        if len(t) > 1 and t not in NOISE_NAMA:
+            tok.append(t)
+    return ' '.join(tok).strip()
+
+
+def cocokkan_cabang(tok: str, kanonik, alias):
+    """Cocokkan token ke daftar cabang resmi. -> (nama_cabang, keterangan)."""
+    t = _huruf(tok)
+    if not t:
+        return '', ''
+    for a, v in alias.items():
+        A = _huruf(a)
+        if A and (A.startswith(t) or t.startswith(A)):
+            return v, f'alias {a}'
+    kandidat = [c for c in kanonik
+                if _huruf(c).startswith(t) or t.startswith(_huruf(c))]
+    if len(kandidat) == 1:
+        return kandidat[0], ''
+    if len(kandidat) > 1:
+        return tok.upper(), 'ambigu: ' + '/'.join(kandidat)
+    return tok.upper(), 'di luar daftar'
+
+
+def _cabang_dari_kolom(d: pd.DataFrame) -> str:
+    """Kalau kolom CABANG terisi seragam, pakai itu. '' kalau kosong/beragam."""
+    if 'CABANG' not in d.columns:
+        return ''
+    v = d['CABANG'].dropna().astype(str).str.strip()
+    v = v[(v != '') & (~v.str.upper().isin(['NAN', 'NONE']))]
+    if v.empty:
+        return ''
+    return '' if v.nunique() > 1 else v.iloc[0]     # beragam -> biarkan apa adanya
+
+
+def _potongan_berkas(nama_berkas: str, isi: bytes):
+    """Pecah satu berkas jadi (DataFrame, nama_bagian). Bagian = sheet untuk xlsx."""
+    low = str(nama_berkas).lower()
+    if low.endswith('.gz'):
+        yield pd.read_csv(io.BytesIO(isi), compression='gzip'), ''
+    elif low.endswith(('.csv', '.txt')):
+        yield pd.read_csv(io.BytesIO(isi)), ''
     else:
-        xls = pd.ExcelFile(io.BytesIO(file_bytes), engine='openpyxl')
-        frames = []
+        xls = None
+        for mesin in ('calamine', 'openpyxl'):      # calamine jauh lebih cepat
+            try:
+                xls = pd.ExcelFile(io.BytesIO(isi), engine=mesin)
+                break
+            except Exception:                        # noqa: BLE001, PERF203
+                continue
+        if xls is None:
+            xls = pd.ExcelFile(io.BytesIO(isi), engine='openpyxl')
         for sheet in xls.sheet_names:
             d = xls.parse(sheet)
-            if d.empty:
-                continue
-            d['CABANG'] = sheet
-            frames.append(d)
-        if not frames:
-            return pd.DataFrame()
-        df = pd.concat(frames, ignore_index=True, sort=False)
+            if not d.empty:
+                yield d, sheet
 
+
+@st.cache_data(show_spinner="Membaca berkas penjualan...")
+def baca_mentah(items: tuple, kanonik: tuple, alias_items: tuple):
+    """Gabung banyak berkas jadi satu tabel mentah + catatan asal tiap potongan.
+
+    items: tuple of (nama_berkas, bytes). Nama cabang dicari berurutan:
+    kolom CABANG -> nama sheet -> nama berkas -> kosong (diisi manual di sidebar).
+    """
+    alias = dict(alias_items)
+    frames, catatan, gagal = [], [], []
+    for nama_berkas, isi in items:
+        try:
+            potongan = list(_potongan_berkas(nama_berkas, isi))
+        except Exception as e:                                   # noqa: BLE001
+            gagal.append(f"{nama_berkas}: {e}")
+            continue
+        if not potongan:
+            gagal.append(f"{nama_berkas}: tidak ada baris data")
+            continue
+        for d, bagian in potongan:
+            kurang = [c for c in SALES_REQUIRED if c not in d.columns]
+            if kurang:
+                gagal.append(f"{nama_berkas}"
+                             + (f" [{bagian}]" if bagian else "")
+                             + ": kolom tidak ditemukan — " + ", ".join(kurang))
+                continue
+            d = d[[c for c in KOLOM_DIPAKAI if c in d.columns]].copy()   # hemat memori
+
+            cab, asal, ket = _cabang_dari_kolom(d), 'kolom CABANG', ''
+            if not cab and bagian:
+                tok = token_cabang(bagian)
+                if tok:
+                    cab, ket = cocokkan_cabang(tok, kanonik, alias)
+                    asal = 'nama sheet'
+            if not cab:
+                tok = token_cabang(nama_berkas)
+                if tok:
+                    cab, ket = cocokkan_cabang(tok, kanonik, alias)
+                    asal = 'nama berkas'
+            beragam = ('CABANG' in d.columns) and bool(d['CABANG'].notna().any())
+            if not cab:
+                asal, ket = ('kolom CABANG', 'beragam per baris') if beragam \
+                    else ('—', 'perlu diisi manual')
+
+            if cab:
+                d['CABANG'] = cab
+            elif not beragam:
+                d['CABANG'] = pd.NA
+            d['__BERKAS__'] = nama_berkas
+            d['__BAGIAN__'] = bagian
+            frames.append(d)
+            catatan.append({
+                'Berkas': nama_berkas, 'Bagian': bagian or '—',
+                'Cabang': cab if cab else ('(beragam)' if beragam else LABEL_TANPA_CABANG),
+                'Dari': asal, 'Catatan': ket, 'Baris': len(d)})
+    if not frames:
+        return pd.DataFrame(), pd.DataFrame(catatan), gagal
+    return (pd.concat(frames, ignore_index=True, sort=False),
+            pd.DataFrame(catatan), gagal)
+
+
+def bersihkan(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalisasi kolom + saring baris kategori JASA (dipakai semua sumber data)."""
     if df.empty:
         return df
-    missing = [c for c in SALES_REQUIRED if c not in df.columns]
-    if missing:
-        raise ValueError("Kolom tidak ditemukan: " + ", ".join(missing))
-
+    df = df.copy()
     for c in ['QTY', 'TOTAL HARGA']:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
     df['TGL'] = pd.to_datetime(df['TGL FAKTUR'], errors='coerce')
     df['KATEGORI'] = df['KATEGORI BARANG'].astype(str).str.strip().str.upper()
     df['BARANG'] = df['NAMA BARANG'].astype(str).str.strip()
+    df['CABANG'] = (df['CABANG'].astype(str).str.strip()
+                    .replace({'': LABEL_TANPA_CABANG, 'nan': LABEL_TANPA_CABANG,
+                              'NaN': LABEL_TANPA_CABANG, 'None': LABEL_TANPA_CABANG})
+                    .fillna(LABEL_TANPA_CABANG))
 
     fin = df['NAMA TEKNISI (FINAL)'] if 'NAMA TEKNISI (FINAL)' in df.columns \
         else pd.Series(index=df.index, dtype=object)
     asli = df['NAMA TEKNISI'] if 'NAMA TEKNISI' in df.columns \
         else pd.Series(index=df.index, dtype=object)
     tek = fin.fillna(asli).astype(str).str.strip().str.upper()
-    tek = tek.replace({'NAN': '', 'NONE': ''})
+    tek = tek.replace({'NAN': '', 'NONE': '', '<NA>': ''}).fillna('')
     df['TEKNISI'] = tek
     df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
 
@@ -188,26 +340,127 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner="Membaca data penjualan...")
+def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
+    """Loader berkas tunggal (dipakai untuk data bawaan repo)."""
+    nama = {'csv_gz': 'penjualan.csv.gz', 'csv': 'penjualan.csv'}.get(source_kind, 'penjualan.xlsx')
+    mentah, _, gagal = baca_mentah(((nama, file_bytes),), tuple(CABANG_KANONIK),
+                                   tuple(ALIAS_CABANG_AWAL.items()))
+    if mentah.empty:
+        raise ValueError(gagal[0] if gagal else "tidak ada baris data")
+    return bersihkan(mentah)
+
+
 # ---------------------------------------------------------------------------
-# Sidebar: sumber data
+# Sidebar: sumber data (mendukung banyak berkas — satu kiriman per cabang)
 # ---------------------------------------------------------------------------
 st.sidebar.title("📁 Sumber Data")
-up = st.sidebar.file_uploader(
-    "Upload data penjualan (opsional)", type=['xlsx', 'gz', 'csv'],
-    help="Kalau kosong, dipakai file bawaan data/penjualan.csv.gz.")
+ups = st.sidebar.file_uploader(
+    "Upload data penjualan — bisa banyak berkas sekaligus",
+    type=['xlsx', 'xlsm', 'gz', 'csv'], accept_multiple_files=True,
+    key='uploader_cabang',
+    help="Kirim satu berkas per cabang (boleh 25 sekaligus), atau satu berkas gabungan. "
+         "Kalau kosong, dipakai berkas bawaan data/penjualan.csv.gz.")
+
+buang_duplikat = st.sidebar.checkbox(
+    "Buang kiriman ulang (duplikat antar berkas)", value=True, key='opsi_dedup',
+    help="Kalau satu cabang mengirim berkas dua kali, baris yang sama persis "
+         "(cabang, no faktur, barang, qty, total, tanggal) hanya dihitung sekali — "
+         "yang dipakai berkas terakhir. Baris kembar di dalam satu berkas tetap utuh.")
+
+with st.sidebar.expander("🏷️ Daftar & alias cabang", expanded=False):
+    st.caption("Nama berkas kiriman cabang sering terpotong (mis. `001mflashklende`). "
+               "Potongan itu dicocokkan ke daftar di bawah lewat awalan nama.")
+    teks_kanonik = st.text_area(
+        "Daftar cabang resmi (satu per baris)",
+        value=st.session_state.get('teks_kanonik', "\n".join(CABANG_KANONIK)),
+        height=150, key='teks_kanonik')
+    teks_alias = st.text_area(
+        "Alias — format `nama lain = CABANG RESMI`",
+        value=st.session_state.get(
+            'teks_alias', "\n".join(f"{k} = {v}" for k, v in ALIAS_CABANG_AWAL.items())),
+        height=90, key='teks_alias',
+        help="Contoh: TELUK JAMBE = KARAWANG")
+
+kanonik = tuple(dict.fromkeys(
+    b.strip().upper() for b in teks_kanonik.splitlines() if b.strip()))
+alias_items = tuple(
+    (a.strip().upper(), b.strip().upper())
+    for a, _, b in (baris.partition('=') for baris in teks_alias.splitlines())
+    if a.strip() and b.strip())
 
 jasa_all = pd.DataFrame()
+catatan_berkas = pd.DataFrame()
 try:
-    if up is not None:
-        kind = ('csv_gz' if up.name.endswith('.gz')
-                else 'csv' if up.name.endswith('.csv') else 'xlsx')
-        jasa_all = load_sales(up.getvalue(), kind)
-        st.sidebar.success("Memakai file yang diupload.")
+    if ups:
+        items = tuple((u.name, u.getvalue()) for u in ups)
+        mentah, catatan_berkas, gagal = baca_mentah(items, kanonik, alias_items)
+        mentah = mentah.copy()
+
+        # --- koreksi manual untuk potongan yang cabangnya tak terdeteksi ---
+        if not mentah.empty and not catatan_berkas.empty:
+            perlu = catatan_berkas['Cabang'] == LABEL_TANPA_CABANG
+            if perlu.any():
+                st.sidebar.warning(f"{int(perlu.sum())} berkas belum ketahuan cabangnya — "
+                                   "isi manual di bawah.")
+                with st.sidebar.form('form_cabang'):
+                    isian = {}
+                    for _, r in catatan_berkas[perlu].iterrows():
+                        label = r['Berkas'] + (f" [{r['Bagian']}]" if r['Bagian'] != '—' else '')
+                        isian[(r['Berkas'], r['Bagian'])] = st.text_input(
+                            f"Cabang untuk {label}", key=f"cab_{label}")
+                    if st.form_submit_button("Terapkan nama cabang"):
+                        st.session_state['peta_cabang'] = {
+                            k: v.strip().upper() for k, v in isian.items() if v.strip()}
+                        st.rerun()
+            for (berkas, bagian), cab in st.session_state.get('peta_cabang', {}).items():
+                m = (mentah['__BERKAS__'] == berkas) & \
+                    (mentah['__BAGIAN__'] == ('' if bagian == '—' else bagian))
+                mentah.loc[m, 'CABANG'] = cab
+                mc = (catatan_berkas['Berkas'] == berkas) & (catatan_berkas['Bagian'] == bagian)
+                catatan_berkas.loc[mc, 'Cabang'] = cab
+                catatan_berkas.loc[mc, 'Dari'] = 'isian manual'
+                catatan_berkas.loc[mc, 'Catatan'] = ''
+
+        n_dup = 0
+        if not mentah.empty and buang_duplikat and \
+                all(c in mentah.columns for c in KUNCI_DUPLIKAT):
+            sebelum = len(mentah)
+            # nomor urut kemunculan di dalam satu berkas -> baris kembar yang memang
+            # ada di berkas aslinya tidak ikut terbuang, hanya kiriman ulang
+            mentah['__N__'] = mentah.groupby(KUNCI_DUPLIKAT + ['__BERKAS__'],
+                                             dropna=False).cumcount()
+            mentah = mentah.drop_duplicates(subset=KUNCI_DUPLIKAT + ['__N__'],
+                                            keep='last').drop(columns='__N__')
+            n_dup = sebelum - len(mentah)
+
+        jasa_all = bersihkan(mentah)
+        if gagal:
+            st.sidebar.error("Berkas dilewati:\n\n- " + "\n- ".join(gagal))
+        if not jasa_all.empty:
+            st.sidebar.success(
+                f"{len(ups)} berkas · {jasa_all['CABANG'].nunique()} cabang · "
+                f"{len(jasa_all):,} baris jasa"
+                + (f" · {n_dup:,} baris duplikat dibuang" if n_dup else ""))
     elif DEFAULT_SALES_PATH.exists():
         jasa_all = load_sales(DEFAULT_SALES_PATH.read_bytes(), 'csv_gz')
         st.sidebar.info("Memakai data bawaan repo.")
 except Exception as e:  # noqa: BLE001
     st.sidebar.error(f"Data tidak terbaca: {e}")
+
+if not catatan_berkas.empty:
+    with st.sidebar.expander(f"📄 Rincian {len(catatan_berkas)} berkas terbaca", expanded=True):
+        st.dataframe(catatan_berkas, hide_index=True, use_container_width=True)
+        ragu = catatan_berkas[catatan_berkas['Catatan'].astype(str).str.startswith(
+            ('ambigu', 'di luar daftar', 'perlu'))]
+        if len(ragu):
+            st.warning("Periksa berkas ini — nama cabangnya belum pasti: "
+                       + ", ".join(ragu['Berkas'].astype(str)))
+        ganda = (catatan_berkas[catatan_berkas['Cabang'] != LABEL_TANPA_CABANG]
+                 .groupby('Cabang')['Berkas'].nunique())
+        ganda = ganda[ganda > 1]
+        if len(ganda):
+            st.info("Cabang dengan lebih dari satu berkas: " + ", ".join(ganda.index))
 
 st.title("🧰 Bagi Hasil Teknisi")
 
