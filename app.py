@@ -371,15 +371,13 @@ buang_duplikat = st.sidebar.checkbox(
 with st.sidebar.expander("🏷️ Daftar & alias cabang", expanded=False):
     st.caption("Nama berkas kiriman cabang sering terpotong (mis. `001mflashklende`). "
                "Potongan itu dicocokkan ke daftar di bawah lewat awalan nama.")
+    st.session_state.setdefault('teks_kanonik', "\n".join(CABANG_KANONIK))
+    st.session_state.setdefault(
+        'teks_alias', "\n".join(f"{k} = {v}" for k, v in ALIAS_CABANG_AWAL.items()))
     teks_kanonik = st.text_area(
-        "Daftar cabang resmi (satu per baris)",
-        value=st.session_state.get('teks_kanonik', "\n".join(CABANG_KANONIK)),
-        height=150, key='teks_kanonik')
+        "Daftar cabang resmi (satu per baris)", height=150, key='teks_kanonik')
     teks_alias = st.text_area(
-        "Alias — format `nama lain = CABANG RESMI`",
-        value=st.session_state.get(
-            'teks_alias', "\n".join(f"{k} = {v}" for k, v in ALIAS_CABANG_AWAL.items())),
-        height=90, key='teks_alias',
+        "Alias — format `nama lain = CABANG RESMI`", height=100, key='teks_alias',
         help="Contoh: TELUK JAMBE = KARAWANG")
 
 kanonik = tuple(dict.fromkeys(
