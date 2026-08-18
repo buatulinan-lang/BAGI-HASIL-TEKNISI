@@ -1,5 +1,5 @@
 diff --git a/app.py b/app.py
-index 8faf8d9..ffb2387 100644
+index 8faf8d9..fa631cc 100644
 --- a/app.py
 +++ b/app.py
 @@ -11,6 +11,7 @@ Jalankan:
@@ -10,7 +10,83 @@ index 8faf8d9..ffb2387 100644
  from datetime import date
  from pathlib import Path
  
-@@ -140,46 +141,197 @@ def daftar_periode_gaji(tgl_min, tgl_max):
+@@ -31,11 +32,75 @@ PALETTE = ['#1f3864', '#2e9bd6', '#16a34a', '#e0921f', '#c9392f',
+ 
+ # --- aturan bagi hasil (nilai awal; bisa diubah dari dashboard) --------------
+ KATA_KUNCI_TARIF = ['INTERFACE', 'NORMAL', 'MATI TOTAL', 'PROMO']
++KATEGORI_TARIF = ['Interface', 'Normal', 'Mati Total', 'Promo', 'Lainnya']
+ TARIF_AWAL = {'Interface': 20.0, 'Normal': 30.0, 'Mati Total': 32.0, 'Promo': 60.0}
+ TARIF_DEFAULT_AWAL = 30.0
+ TARIF_PEMBANDING_AWAL = 30.0
+ LABEL_LAINNYA = 'Lainnya'
+ 
++# Teknisi dengan kesepakatan tarif berbeda dari tarif umum.
++# Kolom kosong (None) berarti mengikuti tarif umum untuk kualifikasi itu.
++NAMA_TARIF_RATA_20 = [
++    'M IBNU SIDIK', 'RAFI ALAMSYAH', 'MIFTAHUL MUTTAQIEN', 'BRYAN PUTRA',
++    'HAMZAH MAULANA', 'DAVID SONDAKH', 'FATHUR ROHMAN SOBARNA', 'ALAI ARKAN',
++    'ALFIN DAMARA', 'ADI FIRDAUS', 'M IQBAL PRADANA', 'IRSYAD PANCA GUNAWAN',
++    'EGI SETYA RAMADHANI', 'ALVI SYAHLANI RAMADHAN', 'M NAUFAL', 'M HANIF FATIN',
++    'SYAHDAN IBNU FAUZI', 'JUNARA', 'KARIM AGAKHAN', 'FARID HASBY ASH SHIDDIQ',
++    'RIDWAN KURNIAWAN',
++]
++NAMA_TARIF_NORMAL_355 = ['EKO RISDIYANTORO JATIMULYA', 'IRVAN SYAHRONI']
++KOL_TARIF_KHUSUS = ['Nama Teknisi', 'Interface', 'Normal', 'Mati Total', 'Promo',
++                    'Lainnya']
++
++
++def tarif_khusus_awal():
++    baris = [{'Nama Teknisi': n, 'Interface': 20.0, 'Normal': 20.0,
++              'Mati Total': 20.0, 'Promo': 20.0, 'Lainnya': 20.0}
++             for n in NAMA_TARIF_RATA_20]
++    baris += [{'Nama Teknisi': n, 'Interface': None, 'Normal': 35.5,
++               'Mati Total': 37.5, 'Promo': None, 'Lainnya': None}
++              for n in NAMA_TARIF_NORMAL_355]
++    return pd.DataFrame(baris, columns=KOL_TARIF_KHUSUS)
++
++
++def _nama_rapi(s):
++    return re.sub(r'\s+', ' ', str(s).strip().upper())
++
++
++def peta_tarif_khusus(tabel):
++    """DataFrame editor -> {nama_rapi: {label_kualifikasi: pecahan tarif}}."""
++    hasil = {}
++    if tabel is None or len(tabel) == 0:
++        return hasil
++    for _, r in tabel.iterrows():
++        nama = _nama_rapi(r.get('Nama Teknisi', ''))
++        if not nama or nama == 'NAN':
++            continue
++        tar = {}
++        for lbl in KATEGORI_TARIF:
++            v = r.get(lbl)
++            if v is not None and not pd.isna(v):
++                tar[lbl] = float(v) / 100.0
++        if tar:
++            hasil[nama] = tar
++    return hasil
++
++
++def cocokkan_teknisi(nama_teknisi, kunci_khusus):
++    """Nama di data sering berakhiran nama cabang ('IRVAN SYAHRONI CINERE').
++
++    Dicocokkan sama persis atau lewat awalan; kunci terpanjang menang.
++    """
++    peta = {}
++    kunci = sorted(kunci_khusus, key=len, reverse=True)
++    for t in nama_teknisi:
++        tn = _nama_rapi(t)
++        for k in kunci:
++            if tn == k or tn.startswith(k + ' '):
++                peta[t] = k
++                break
++    return peta
++
+ st.markdown("""
+ <style>
+   .kpi-wrap{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:6px;}
+@@ -140,46 +205,197 @@ def daftar_periode_gaji(tgl_min, tgl_max):
  
  
  SALES_REQUIRED = ['TGL FAKTUR', 'NO FAKTUR', 'KATEGORI BARANG', 'NAMA BARANG',
@@ -230,7 +306,7 @@ index 8faf8d9..ffb2387 100644
      df['TEKNISI'] = tek
      df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
  
-@@ -188,27 +340,128 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
+@@ -188,27 +404,126 @@ def load_sales(file_bytes: bytes, source_kind: str) -> pd.DataFrame:
      return df
  
  
@@ -269,15 +345,13 @@ index 8faf8d9..ffb2387 100644
 +with st.sidebar.expander("🏷️ Daftar & alias cabang", expanded=False):
 +    st.caption("Nama berkas kiriman cabang sering terpotong (mis. `001mflashklende`). "
 +               "Potongan itu dicocokkan ke daftar di bawah lewat awalan nama.")
++    st.session_state.setdefault('teks_kanonik', "\n".join(CABANG_KANONIK))
++    st.session_state.setdefault(
++        'teks_alias', "\n".join(f"{k} = {v}" for k, v in ALIAS_CABANG_AWAL.items()))
 +    teks_kanonik = st.text_area(
-+        "Daftar cabang resmi (satu per baris)",
-+        value=st.session_state.get('teks_kanonik', "\n".join(CABANG_KANONIK)),
-+        height=150, key='teks_kanonik')
++        "Daftar cabang resmi (satu per baris)", height=150, key='teks_kanonik')
 +    teks_alias = st.text_area(
-+        "Alias — format `nama lain = CABANG RESMI`",
-+        value=st.session_state.get(
-+            'teks_alias', "\n".join(f"{k} = {v}" for k, v in ALIAS_CABANG_AWAL.items())),
-+        height=90, key='teks_alias',
++        "Alias — format `nama lain = CABANG RESMI`", height=100, key='teks_alias',
 +        help="Contoh: TELUK JAMBE = KARAWANG")
 +
 +kanonik = tuple(dict.fromkeys(
@@ -368,7 +442,75 @@ index 8faf8d9..ffb2387 100644
  st.title("🧰 Bagi Hasil Teknisi")
  
  if jasa_all.empty:
-@@ -451,6 +704,193 @@ with u2:
+@@ -261,6 +576,25 @@ with st.expander("⚙️ Pengaturan Tarif Bagi Hasil — klik untuk mengubah", e
+             "Kalau satu nama mengandung 2 kata kunci, yang menang:",
+             ['Normal', 'Promo', 'Mati Total', 'Interface'], index=0, key='t_prio')
+ 
++    st.divider()
++    st.markdown("**Tarif khusus per teknisi**")
++    st.caption(
++        "Teknisi di tabel ini memakai persentase sendiri; kolom yang dikosongkan "
++        "ikut tarif umum di atas. Nama dicocokkan sama persis atau lewat awalan, "
++        "jadi `IRVAN SYAHRONI` juga kena untuk `IRVAN SYAHRONI CINERE`. "
++        "Baris bisa ditambah/dihapus langsung di tabel.")
++    if 'tabel_khusus' not in st.session_state:
++        st.session_state['tabel_khusus'] = tarif_khusus_awal()
++    tabel_khusus = st.data_editor(
++        st.session_state['tabel_khusus'], key='ed_khusus', num_rows='dynamic',
++        use_container_width=True, hide_index=True,
++        column_config={
++            'Nama Teknisi': st.column_config.TextColumn(width='medium'),
++            **{lbl: st.column_config.NumberColumn(f'{lbl} (%)', min_value=0.0,
++                                                 max_value=100.0, step=0.5,
++                                                 format='%.1f')
++               for lbl in KATEGORI_TARIF}})
++
+     if st.button("↩️ Kembalikan ke tarif awal", key='t_reset'):
+         for k, v in [('t_int', 'Interface'), ('t_nor', 'Normal'),
+                      ('t_mat', 'Mati Total'), ('t_pro', 'Promo')]:
+@@ -268,6 +602,8 @@ with st.expander("⚙️ Pengaturan Tarif Bagi Hasil — klik untuk mengubah", e
+         st.session_state['t_lain'] = TARIF_DEFAULT_AWAL
+         st.session_state['t_flat'] = TARIF_PEMBANDING_AWAL
+         st.session_state['t_prio'] = 'Normal'
++        st.session_state['tabel_khusus'] = tarif_khusus_awal()
++        st.session_state.pop('ed_khusus', None)
+         st.rerun()
+ 
+ urutan = [prioritas.upper()] + [k for k in KATA_KUNCI_TARIF if k != prioritas.upper()]
+@@ -277,6 +613,18 @@ peta_tarif[LABEL_LAINNYA] = tarif_lain / 100.0
+ jasa_all = jasa_all.copy()
+ jasa_all['TARIF_LABEL'] = jasa_all['KW_MATCH'].map(lambda s: pilih_label_tarif(s, urutan))
+ jasa_all['TARIF'] = jasa_all['TARIF_LABEL'].map(peta_tarif).fillna(0.0)
++
++khusus = peta_tarif_khusus(tabel_khusus)
++peta_nama = cocokkan_teknisi(jasa_all['TEKNISI'].unique(), khusus.keys())
++jasa_all['TARIF_KHUSUS'] = jasa_all['TEKNISI'].map(peta_nama)
++n_khusus = 0
++for kunci, tar in khusus.items():
++    for lbl, frac in tar.items():
++        m = (jasa_all['TARIF_KHUSUS'] == kunci) & (jasa_all['TARIF_LABEL'] == lbl)
++        jasa_all.loc[m, 'TARIF'] = frac
++        n_khusus += int(m.sum())
++tanpa_padanan = sorted(set(khusus) - set(peta_nama.values()))
++
+ jasa_all['BAGI_HASIL'] = jasa_all['TOTAL HARGA'] * jasa_all['TARIF']
+ jasa_all['FLAT'] = jasa_all['TOTAL HARGA'] * (tarif_flat / 100.0)
+ 
+@@ -286,6 +634,13 @@ st.caption(
+     f" · Lainnya {tarif_lain:.0f}% · pembanding flat {tarif_flat:.0f}%"
+     f" · prioritas bentrok: {prioritas}"
+ )
++if khusus:
++    st.caption(
++        f"**Tarif khusus:** {len(khusus)} teknisi terdaftar, "
++        f"{len(set(peta_nama.values()))} ketemu di data dan mempengaruhi "
++        f"{n_khusus:,} baris jasa."
++        + (f" Belum ada padanannya di data: {', '.join(tanpa_padanan)}."
++           if tanpa_padanan else ""))
+ 
+ # ---------------------------------------------------------------------------
+ # Filter periode & cabang
+@@ -451,6 +806,241 @@ with u2:
  st.caption("Kedua berkas memuat kolom **Nama Teknisi**, **Cabang**, dan "
             "**Bagi Hasil (Aturan)**, ditambah omzet, pembanding, dan selisihnya.")
  
@@ -376,6 +518,17 @@ index 8faf8d9..ffb2387 100644
 +# Unduhan Excel (multi-sheet: rekap + satu sheet per cabang)
 +# ---------------------------------------------------------------------------
 +KATEGORI_ORDER = ['Interface', 'Normal', 'Mati Total', 'Promo', LABEL_LAINNYA]
++
++# Kolom penggajian pada sheet per cabang. Sembilan kolom potongan dikosongkan
++# untuk diisi finance; sisanya berisi rumus Excel yang ikut menyesuaikan.
++KOLOM_POTONGAN = ['Potongan Refund', 'Potongan AR', 'Potongan Kasbon', 'Keterlambatan',
++                  'Potongan Minus Audit', 'Potongan Audit Compliance',
++                  'Biaya Pendaftaran Koperasi', 'Simpanan Pokok', 'Simpanan Wajib']
++KOLOM_CADANGAN = ['Cadangan 7 Tahun / bulan', 'Cadangan 7 Tahun']
++KOLOM_RUMUS = ['Total Potongan', 'Gaji Teknisi', 'Nett Bagi hasil',
++               'Total Cadangan 7 Tahun']
++KOLOM_GAJI = (KOLOM_POTONGAN + ['Total Potongan', 'Gaji Teknisi', 'Nett Bagi hasil']
++              + KOLOM_CADANGAN + ['Total Cadangan 7 Tahun'])
 +
 +
 +def _sheet_name(nama, terpakai):
@@ -426,7 +579,26 @@ index 8faf8d9..ffb2387 100644
 +    return out.sort_values('Bagi Hasil (Aturan)', ascending=False).reset_index(drop=True)
 +
 +
-+def _tulis_sheet(writer, df, nama_sheet, judul):
++def _rumus_gaji(df, r):
++    """Rumus Excel kolom penggajian untuk baris ke-r (1-indexed di worksheet)."""
++    from openpyxl.utils import get_column_letter as L
++
++    def kol(nama):
++        return L(df.columns.get_loc(nama) + 1)
++
++    return {
++        'Total Potongan':
++            f"=SUM({kol(KOLOM_POTONGAN[0])}{r}:{kol(KOLOM_POTONGAN[-1])}{r})",
++        'Gaji Teknisi':
++            f"={kol('Bagi Hasil (Aturan)')}{r}-{kol('Total Potongan')}{r}",
++        'Nett Bagi hasil':
++            f"={kol('Gaji Teknisi')}{r}-{kol('Cadangan 7 Tahun / bulan')}{r}",
++        'Total Cadangan 7 Tahun':
++            f"={kol('Cadangan 7 Tahun / bulan')}{r}+{kol('Cadangan 7 Tahun')}{r}",
++    }
++
++
++def _tulis_sheet(writer, df, nama_sheet, judul, kolom_gaji=False):
 +    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 +    from openpyxl.utils import get_column_letter
 +
@@ -445,9 +617,13 @@ index 8faf8d9..ffb2387 100644
 +    head_font = Font(bold=True, color='FFFFFF', size=10)
 +    thin = Side(style='thin', color='D9D9D9')
 +
++    isian_fill = PatternFill('solid', fgColor='B45309')      # coklat: diisi manual
++    rumus_fill = PatternFill('solid', fgColor='166534')       # hijau: rumus otomatis
 +    for j, kol in enumerate(df.columns, start=1):
 +        c = ws.cell(row=4, column=j)
-+        c.fill, c.font = head_fill, head_font
++        c.font = head_font
++        c.fill = (isian_fill if kol in (KOLOM_POTONGAN + KOLOM_CADANGAN)
++                  else rumus_fill if kol in KOLOM_RUMUS else head_fill)
 +        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 +        c.border = Border(bottom=Side(style='medium', color='1F3864'))
 +        lebar = max(len(str(kol)) + 2,
@@ -455,7 +631,8 @@ index 8faf8d9..ffb2387 100644
 +        ws.column_dimensions[get_column_letter(j)].width = min(max(lebar, 10), 34)
 +
 +    kol_rp = [c for c in df.columns
-+              if c.startswith(('Omzet', 'Bagi Hasil')) or c in (lbl_flat, 'Selisih')]
++              if c.startswith(('Omzet', 'Bagi Hasil')) or c in (lbl_flat, 'Selisih')
++              or c in KOLOM_GAJI]
 +    idx_rp = [df.columns.get_loc(c) + 1 for c in kol_rp]
 +    idx_baris = (df.columns.get_loc('Baris') + 1) if 'Baris' in df.columns else None
 +    idx_pct = (df.columns.get_loc('Efektif %') + 1) if 'Efektif %' in df.columns else None
@@ -473,6 +650,13 @@ index 8faf8d9..ffb2387 100644
 +            ws.cell(row=r, column=idx_pct).number_format = '0.0'
 +        for j in range(1, n_kol + 1):
 +            ws.cell(row=r, column=j).border = Border(bottom=thin)
++        if kolom_gaji:
++            for kol in KOLOM_POTONGAN + KOLOM_CADANGAN:
++                ws.cell(row=r, column=df.columns.get_loc(kol) + 1).fill = \
++                    PatternFill('solid', fgColor='FFF8E1')
++            for kol, rumus in _rumus_gaji(df, r).items():
++                sel = ws.cell(row=r, column=df.columns.get_loc(kol) + 1, value=rumus)
++                sel.number_format = '#,##0'
 +
 +    # baris TOTAL
 +    if n_baris:
@@ -531,8 +715,10 @@ index 8faf8d9..ffb2387 100644
 +                continue
 +            dc = rekap_kualifikasi(sub, ['TEKNISI']).copy()
 +            dc.insert(1, 'Cabang', cab)
++            for kol in KOLOM_GAJI:
++                dc[kol] = pd.NA
 +            _tulis_sheet(writer, dc, _sheet_name(cab, terpakai),
-+                         f'Bagi Hasil Teknisi — Cabang {cab}')
++                         f'Bagi Hasil Teknisi — Cabang {cab}', kolom_gaji=True)
 +    buf.seek(0)
 +    return buf.getvalue()
 +
@@ -543,7 +729,11 @@ index 8faf8d9..ffb2387 100644
 +        "Berisi kolom **Nama Teknisi**, **Cabang**, **Omzet**, rincian kualifikasi "
 +        "**Interface / Normal / Mati Total / Promo / Lainnya** (omzet & bagi hasil "
 +        "masing-masing), serta **Bagi Hasil**. Sheet: rekap gabungan, rekap per teknisi, "
-+        "rekap per cabang, lalu satu sheet untuk tiap cabang."
++        "rekap per cabang, lalu satu sheet untuk tiap cabang.\n\n"
++        "Sheet per cabang ditambah kolom penggajian: sembilan kolom potongan "
++        "(header **coklat** = diisi manual) plus Total Potongan, Gaji Teknisi, "
++        "Nett Bagi Hasil, dan Total Cadangan 7 Tahun (header **hijau** = rumus Excel, "
++        "ikut berubah begitu potongannya diisi)."
 +    )
 +    if st.button("🧾 Siapkan berkas Excel", key='siap_xlsx', use_container_width=True):
 +        with st.spinner("Menyusun workbook..."):
@@ -562,6 +752,18 @@ index 8faf8d9..ffb2387 100644
  # ---------------------------------------------------------------------------
  # Grafik & rekap pendukung
  # ---------------------------------------------------------------------------
+@@ -542,6 +1132,11 @@ with st.expander("ℹ️ Cara perhitungan & catatan"):
+         "s/d 23 April 2026. Tanggal acuan: **TGL FAKTUR**.\n\n"
+         f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, "
+         "tanpa membedakan jenis pekerjaan.\n\n"
++        "**Tarif khusus per teknisi** (tabel di panel Pengaturan Tarif) menimpa tarif "
++        "umum hanya untuk kualifikasi yang diisi; kualifikasi yang dikosongkan tetap "
++        "ikut tarif umum. Pencocokan nama memakai awalan, sehingga nama di data yang "
++        "berakhiran nama cabang tetap kena. Tarif pembanding flat tidak ikut "
++        "ditimpa.\n\n"
+         "Nama teknisi diambil dari kolom **NAMA TEKNISI (FINAL)**; bila kosong dipakai "
+         "kolom NAMA TEKNISI. Baris yang keduanya kosong masuk kelompok "
+         "*TIDAK ADA TEKNISI* — tetap ditampilkan agar terlihat, dan bisa disembunyikan "
 diff --git a/requirements.txt b/requirements.txt
 index 102fec9..41f6815 100644
 --- a/requirements.txt

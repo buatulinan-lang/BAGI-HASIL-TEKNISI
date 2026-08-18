@@ -32,10 +32,74 @@ PALETTE = ['#1f3864', '#2e9bd6', '#16a34a', '#e0921f', '#c9392f',
 
 # --- aturan bagi hasil (nilai awal; bisa diubah dari dashboard) --------------
 KATA_KUNCI_TARIF = ['INTERFACE', 'NORMAL', 'MATI TOTAL', 'PROMO']
+KATEGORI_TARIF = ['Interface', 'Normal', 'Mati Total', 'Promo', 'Lainnya']
 TARIF_AWAL = {'Interface': 20.0, 'Normal': 30.0, 'Mati Total': 32.0, 'Promo': 60.0}
 TARIF_DEFAULT_AWAL = 30.0
 TARIF_PEMBANDING_AWAL = 30.0
 LABEL_LAINNYA = 'Lainnya'
+
+# Teknisi dengan kesepakatan tarif berbeda dari tarif umum.
+# Kolom kosong (None) berarti mengikuti tarif umum untuk kualifikasi itu.
+NAMA_TARIF_RATA_20 = [
+    'M IBNU SIDIK', 'RAFI ALAMSYAH', 'MIFTAHUL MUTTAQIEN', 'BRYAN PUTRA',
+    'HAMZAH MAULANA', 'DAVID SONDAKH', 'FATHUR ROHMAN SOBARNA', 'ALAI ARKAN',
+    'ALFIN DAMARA', 'ADI FIRDAUS', 'M IQBAL PRADANA', 'IRSYAD PANCA GUNAWAN',
+    'EGI SETYA RAMADHANI', 'ALVI SYAHLANI RAMADHAN', 'M NAUFAL', 'M HANIF FATIN',
+    'SYAHDAN IBNU FAUZI', 'JUNARA', 'KARIM AGAKHAN', 'FARID HASBY ASH SHIDDIQ',
+    'RIDWAN KURNIAWAN',
+]
+NAMA_TARIF_NORMAL_355 = ['EKO RISDIYANTORO JATIMULYA', 'IRVAN SYAHRONI']
+KOL_TARIF_KHUSUS = ['Nama Teknisi', 'Interface', 'Normal', 'Mati Total', 'Promo',
+                    'Lainnya']
+
+
+def tarif_khusus_awal():
+    baris = [{'Nama Teknisi': n, 'Interface': 20.0, 'Normal': 20.0,
+              'Mati Total': 20.0, 'Promo': 20.0, 'Lainnya': 20.0}
+             for n in NAMA_TARIF_RATA_20]
+    baris += [{'Nama Teknisi': n, 'Interface': None, 'Normal': 35.5,
+               'Mati Total': 37.5, 'Promo': None, 'Lainnya': None}
+              for n in NAMA_TARIF_NORMAL_355]
+    return pd.DataFrame(baris, columns=KOL_TARIF_KHUSUS)
+
+
+def _nama_rapi(s):
+    return re.sub(r'\s+', ' ', str(s).strip().upper())
+
+
+def peta_tarif_khusus(tabel):
+    """DataFrame editor -> {nama_rapi: {label_kualifikasi: pecahan tarif}}."""
+    hasil = {}
+    if tabel is None or len(tabel) == 0:
+        return hasil
+    for _, r in tabel.iterrows():
+        nama = _nama_rapi(r.get('Nama Teknisi', ''))
+        if not nama or nama == 'NAN':
+            continue
+        tar = {}
+        for lbl in KATEGORI_TARIF:
+            v = r.get(lbl)
+            if v is not None and not pd.isna(v):
+                tar[lbl] = float(v) / 100.0
+        if tar:
+            hasil[nama] = tar
+    return hasil
+
+
+def cocokkan_teknisi(nama_teknisi, kunci_khusus):
+    """Nama di data sering berakhiran nama cabang ('IRVAN SYAHRONI CINERE').
+
+    Dicocokkan sama persis atau lewat awalan; kunci terpanjang menang.
+    """
+    peta = {}
+    kunci = sorted(kunci_khusus, key=len, reverse=True)
+    for t in nama_teknisi:
+        tn = _nama_rapi(t)
+        for k in kunci:
+            if tn == k or tn.startswith(k + ' '):
+                peta[t] = k
+                break
+    return peta
 
 st.markdown("""
 <style>
@@ -512,6 +576,25 @@ with st.expander("⚙️ Pengaturan Tarif Bagi Hasil — klik untuk mengubah", e
             "Kalau satu nama mengandung 2 kata kunci, yang menang:",
             ['Normal', 'Promo', 'Mati Total', 'Interface'], index=0, key='t_prio')
 
+    st.divider()
+    st.markdown("**Tarif khusus per teknisi**")
+    st.caption(
+        "Teknisi di tabel ini memakai persentase sendiri; kolom yang dikosongkan "
+        "ikut tarif umum di atas. Nama dicocokkan sama persis atau lewat awalan, "
+        "jadi `IRVAN SYAHRONI` juga kena untuk `IRVAN SYAHRONI CINERE`. "
+        "Baris bisa ditambah/dihapus langsung di tabel.")
+    if 'tabel_khusus' not in st.session_state:
+        st.session_state['tabel_khusus'] = tarif_khusus_awal()
+    tabel_khusus = st.data_editor(
+        st.session_state['tabel_khusus'], key='ed_khusus', num_rows='dynamic',
+        use_container_width=True, hide_index=True,
+        column_config={
+            'Nama Teknisi': st.column_config.TextColumn(width='medium'),
+            **{lbl: st.column_config.NumberColumn(f'{lbl} (%)', min_value=0.0,
+                                                 max_value=100.0, step=0.5,
+                                                 format='%.1f')
+               for lbl in KATEGORI_TARIF}})
+
     if st.button("↩️ Kembalikan ke tarif awal", key='t_reset'):
         for k, v in [('t_int', 'Interface'), ('t_nor', 'Normal'),
                      ('t_mat', 'Mati Total'), ('t_pro', 'Promo')]:
@@ -519,6 +602,8 @@ with st.expander("⚙️ Pengaturan Tarif Bagi Hasil — klik untuk mengubah", e
         st.session_state['t_lain'] = TARIF_DEFAULT_AWAL
         st.session_state['t_flat'] = TARIF_PEMBANDING_AWAL
         st.session_state['t_prio'] = 'Normal'
+        st.session_state['tabel_khusus'] = tarif_khusus_awal()
+        st.session_state.pop('ed_khusus', None)
         st.rerun()
 
 urutan = [prioritas.upper()] + [k for k in KATA_KUNCI_TARIF if k != prioritas.upper()]
@@ -528,6 +613,18 @@ peta_tarif[LABEL_LAINNYA] = tarif_lain / 100.0
 jasa_all = jasa_all.copy()
 jasa_all['TARIF_LABEL'] = jasa_all['KW_MATCH'].map(lambda s: pilih_label_tarif(s, urutan))
 jasa_all['TARIF'] = jasa_all['TARIF_LABEL'].map(peta_tarif).fillna(0.0)
+
+khusus = peta_tarif_khusus(tabel_khusus)
+peta_nama = cocokkan_teknisi(jasa_all['TEKNISI'].unique(), khusus.keys())
+jasa_all['TARIF_KHUSUS'] = jasa_all['TEKNISI'].map(peta_nama)
+n_khusus = 0
+for kunci, tar in khusus.items():
+    for lbl, frac in tar.items():
+        m = (jasa_all['TARIF_KHUSUS'] == kunci) & (jasa_all['TARIF_LABEL'] == lbl)
+        jasa_all.loc[m, 'TARIF'] = frac
+        n_khusus += int(m.sum())
+tanpa_padanan = sorted(set(khusus) - set(peta_nama.values()))
+
 jasa_all['BAGI_HASIL'] = jasa_all['TOTAL HARGA'] * jasa_all['TARIF']
 jasa_all['FLAT'] = jasa_all['TOTAL HARGA'] * (tarif_flat / 100.0)
 
@@ -537,6 +634,13 @@ st.caption(
     f" · Lainnya {tarif_lain:.0f}% · pembanding flat {tarif_flat:.0f}%"
     f" · prioritas bentrok: {prioritas}"
 )
+if khusus:
+    st.caption(
+        f"**Tarif khusus:** {len(khusus)} teknisi terdaftar, "
+        f"{len(set(peta_nama.values()))} ketemu di data dan mempengaruhi "
+        f"{n_khusus:,} baris jasa."
+        + (f" Belum ada padanannya di data: {', '.join(tanpa_padanan)}."
+           if tanpa_padanan else ""))
 
 # ---------------------------------------------------------------------------
 # Filter periode & cabang
@@ -1028,6 +1132,11 @@ with st.expander("ℹ️ Cara perhitungan & catatan"):
         "s/d 23 April 2026. Tanggal acuan: **TGL FAKTUR**.\n\n"
         f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, "
         "tanpa membedakan jenis pekerjaan.\n\n"
+        "**Tarif khusus per teknisi** (tabel di panel Pengaturan Tarif) menimpa tarif "
+        "umum hanya untuk kualifikasi yang diisi; kualifikasi yang dikosongkan tetap "
+        "ikut tarif umum. Pencocokan nama memakai awalan, sehingga nama di data yang "
+        "berakhiran nama cabang tetap kena. Tarif pembanding flat tidak ikut "
+        "ditimpa.\n\n"
         "Nama teknisi diambil dari kolom **NAMA TEKNISI (FINAL)**; bila kosong dipakai "
         "kolom NAMA TEKNISI. Baris yang keduanya kosong masuk kelompok "
         "*TIDAK ADA TEKNISI* — tetap ditampilkan agar terlihat, dan bisa disembunyikan "
