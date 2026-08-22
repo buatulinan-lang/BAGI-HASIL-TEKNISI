@@ -168,14 +168,11 @@ def pilih_label_tarif(kw_str, urutan):
 
 
 def periode_gaji(bulan_gaji: int, tahun_gaji: int):
-    """Gaji bulan M dihitung dari 24 bulan (M-2) s/d 23 bulan (M-1).
+    """Gaji bulan M dihitung dari 24 bulan (M-1) s/d 23 bulan M.
 
-    Contoh: gaji Mei 2026 -> 24 Maret 2026 s/d 23 April 2026.
+    Contoh: gaji Juli 2026 -> 24 Juni 2026 s/d 23 Juli 2026.
     """
-    m_akhir, th_akhir = bulan_gaji - 1, tahun_gaji
-    if m_akhir < 1:
-        m_akhir += 12
-        th_akhir -= 1
+    m_akhir, th_akhir = bulan_gaji, tahun_gaji
     m_awal, th_awal = m_akhir - 1, th_akhir
     if m_awal < 1:
         m_awal += 12
@@ -377,6 +374,17 @@ def baca_mentah(items: tuple, kanonik: tuple, alias_items: tuple):
             pd.DataFrame(catatan), gagal)
 
 
+# isian yang dianggap kosong pada kolom nama teknisi
+NAMA_KOSONG = {'', '-', '--', 'NAN', 'NONE', 'NULL', '<NA>', 'N/A', 'NA', '#N/A',
+               'N.A', 'N.A.', '#VALUE!', '#REF!', 'TIDAK ADA'}
+
+
+def _nama_teknisi_bersih(kolom: pd.Series) -> pd.Series:
+    s = (kolom.astype(str).str.replace(r'\s+', ' ', regex=True)
+         .str.strip().str.upper().fillna(''))
+    return s.where(~s.isin(NAMA_KOSONG), '')
+
+
 def bersihkan(df: pd.DataFrame) -> pd.DataFrame:
     """Normalisasi kolom + saring baris kategori JASA (dipakai semua sumber data)."""
     if df.empty:
@@ -396,9 +404,9 @@ def bersihkan(df: pd.DataFrame) -> pd.DataFrame:
         else pd.Series(index=df.index, dtype=object)
     asli = df['NAMA TEKNISI'] if 'NAMA TEKNISI' in df.columns \
         else pd.Series(index=df.index, dtype=object)
-    tek = fin.fillna(asli).astype(str).str.strip().str.upper()
-    tek = tek.replace({'NAN': '', 'NONE': '', '<NA>': ''}).fillna('')
-    df['TEKNISI'] = tek
+    # acuan utama kolom FINAL; kalau kosong / N/A baru pakai NAMA TEKNISI
+    tek = _nama_teknisi_bersih(fin)
+    df['TEKNISI'] = tek.where(tek != '', _nama_teknisi_bersih(asli))
     df.loc[df['TEKNISI'] == '', 'TEKNISI'] = 'TIDAK ADA TEKNISI'
 
     df = df[df['KATEGORI'] == 'JASA'].copy()
@@ -1076,7 +1084,7 @@ def baca_potongan(isi: bytes):
     return hasil, terbaca
 
 
-def _baris_slip(sub, potongan, persen_cadangan):
+def _baris_slip(sub, potongan):
     """Susun angka satu slip dari transaksi seorang teknisi di satu cabang."""
     per_kual = []
     for lbl in KATEGORI_ORDER:
@@ -1092,18 +1100,14 @@ def _baris_slip(sub, potongan, persen_cadangan):
         pot.append((label, sum(float(potongan.get(k, 0) or 0) for k in kolom)))
     total_pot = sum(x[1] for x in pot)
 
-    nett = bruto - total_pot
-    cadangan = nett * persen_cadangan / 100.0
-    total_tabungan = float(potongan.get('Cadangan 7 Tahun', 0) or 0) + cadangan
-    return per_kual, bruto, pot, total_pot, nett, cadangan, total_tabungan
+    return per_kual, bruto, pot, total_pot, bruto - total_pot
 
 
-def _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka, persen_cadangan,
-                 catatan):
+def _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka, catatan):
     from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
 
-    per_kual, bruto, pot, total_pot, nett, cadangan, total_tabungan = angka
+    per_kual, bruto, pot, total_pot, nett = angka
     m = 18 * mm
     y = tinggi - 14 * mm
 
@@ -1194,19 +1198,7 @@ def _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka, persen_cadangan
     c.drawString(m + 2 * mm, y, 'NETT BAGI HASIL')
     c.drawRightString(lebar - m - 2 * mm, y, rupiah(nett))
     c.setFillColorRGB(0, 0, 0)
-    y -= 12 * mm
-
-    judul_tabel('TABUNGAN RUMAH TEKNISI', kolom_kanan=False)
-    c.setFont('Helvetica', 9)
-    c.drawString(m + 2 * mm, y,
-                 'Cadangan Tabungan Rumah periode ini ('
-                 + f'{persen_cadangan:g}'.replace('.', ',') + '% dari nett)')
-    c.drawRightString(lebar - m - 2 * mm, y, rupiah(cadangan))
-    y -= 5.4 * mm
-    c.setFont('Helvetica-Bold', 9)
-    c.drawString(m + 2 * mm, y, 'Total Tabungan Rumah Teknisi')
-    c.drawRightString(lebar - m - 2 * mm, y, rupiah(total_tabungan))
-    y -= 11 * mm
+    y -= 14 * mm
 
     c.setFont('Helvetica-Bold', 8.5)
     c.drawString(m, y, 'Catatan')
@@ -1232,46 +1224,63 @@ def _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka, persen_cadangan
         c.drawCentredString(x + 16 * mm, y - 4.5 * mm, teks)
 
 
-def buat_pdf_cabang(df_cabang, cabang, potongan, persen_cadangan, catatan, periode):
-    """Satu PDF berisi slip semua teknisi di satu cabang, satu slip per halaman."""
+def _nama_berkas_aman(teks, cadangan='TANPA-NAMA'):
+    aman = re.sub(r'[^A-Za-z0-9 _.-]', '-', str(teks)).strip(' .-')
+    return (aman[:80] or cadangan)
+
+
+def buat_pdf_teknisi(sub, nama, cabang, potongan, catatan, periode):
+    """Satu PDF berisi slip satu teknisi saja — siap dikirim ke orangnya."""
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as rl_canvas
 
     buf = io.BytesIO()
     lebar, tinggi = A4
     c = rl_canvas.Canvas(buf, pagesize=A4)
-    c.setTitle(f'Slip Bagi Hasil — {cabang}')
-    nama_teknisi = sorted(df_cabang['TEKNISI'].unique())
-    for nama in nama_teknisi:
-        sub = df_cabang[df_cabang['TEKNISI'] == nama]
-        pot = potongan.get((str(cabang).strip().upper(), str(nama).strip().upper()), {})
-        angka = _baris_slip(sub, pot, persen_cadangan)
-        _gambar_slip(c, lebar, tinggi, nama, cabang, periode, angka,
-                     persen_cadangan, catatan)
-        c.showPage()
+    c.setTitle(f'Slip Bagi Hasil — {nama} ({cabang})')
+    c.setAuthor('Madinah Flash')
+    pot = potongan.get((str(cabang).strip().upper(), str(nama).strip().upper()), {})
+    _gambar_slip(c, lebar, tinggi, nama, cabang, periode,
+                 _baris_slip(sub, pot), catatan)
+    c.showPage()
     c.save()
     buf.seek(0)
-    return buf.getvalue(), len(nama_teknisi)
+    return buf.getvalue()
 
 
-def buat_zip_slip(df_sumber, potongan, persen_cadangan, catatan, periode):
-    """ZIP berisi satu PDF per cabang."""
+def buat_zip_slip(df_sumber, potongan, catatan, periode, zip_per_cabang=False):
+    """Satu PDF per teknisi, dikumpulkan per cabang.
+
+    zip_per_cabang=False -> satu ZIP berisi folder per cabang (default)
+    zip_per_cabang=True  -> satu ZIP berisi berkas .zip terpisah tiap cabang
+    """
     import zipfile
 
     d = df_sumber.copy()
     d['CABANG'] = d['CABANG'].astype(str).str.strip()
     buf = io.BytesIO()
     ringkas = []
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as luar:
         for cab in sorted(d['CABANG'].unique()):
-            sub = d[d['CABANG'] == cab]
-            if sub.empty:
+            sub_cab = d[d['CABANG'] == cab]
+            if sub_cab.empty:
                 continue
-            isi, n = buat_pdf_cabang(sub, cab, potongan, persen_cadangan,
-                                     catatan, periode)
-            aman = re.sub(r'[^A-Za-z0-9 _-]', '-', cab).strip() or 'CABANG'
-            z.writestr(f'{aman}.pdf', isi)
-            ringkas.append({'Cabang': cab, 'Slip': n})
+            folder = _nama_berkas_aman(cab, 'CABANG')
+            berkas = []
+            for nama in sorted(sub_cab['TEKNISI'].unique()):
+                isi = buat_pdf_teknisi(sub_cab[sub_cab['TEKNISI'] == nama], nama, cab,
+                                       potongan, catatan, periode)
+                berkas.append((f'{folder} - {_nama_berkas_aman(nama)}.pdf', isi))
+            if zip_per_cabang:
+                dalam = io.BytesIO()
+                with zipfile.ZipFile(dalam, 'w', zipfile.ZIP_DEFLATED) as z2:
+                    for nm, isi in berkas:
+                        z2.writestr(nm, isi)
+                luar.writestr(f'{folder}.zip', dalam.getvalue())
+            else:
+                for nm, isi in berkas:
+                    luar.writestr(f'{folder}/{nm}', isi)
+            ringkas.append({'Cabang': cab, 'Slip': len(berkas)})
     buf.seek(0)
     return buf.getvalue(), pd.DataFrame(ringkas)
 
@@ -1302,25 +1311,26 @@ with st.container():
 
 
 with st.container():
-    st.markdown("##### 🧾 Unduh Slip Gaji PDF (ZIP, satu PDF per cabang)")
+    st.markdown("##### 🧾 Unduh Slip Gaji PDF (satu PDF per teknisi)")
     st.caption(
-        "Setiap teknisi satu halaman: pendapatan dirinci per kualifikasi lengkap "
-        "dengan persen akad-nya, lalu potongan, Nett Bagi Hasil, dan tabungan rumah. "
+        "Setiap teknisi dapat berkas PDF sendiri supaya gampang dikirim satu-satu, "
+        "dikelompokkan per cabang. Isinya: pendapatan dirinci per kualifikasi lengkap "
+        "dengan persen akad-nya, lalu potongan dan Nett Bagi Hasil. "
         "Nilai potongan diambil dari berkas Excel yang sudah Anda isi — unduh Excel di "
         "atas, isi kolom potongan di sheet tiap cabang, lalu upload kembali di sini."
     )
 
-    sp1, sp2 = st.columns([2, 1])
-    with sp1:
-        up_pot = st.file_uploader(
-            "Excel potongan yang sudah diisi (opsional)", type=['xlsx'],
-            key='up_potongan',
-            help="Berkas hasil tombol Unduh Excel di atas, setelah kolom potongan diisi. "
-                 "Kalau dikosongkan, semua potongan dianggap nol.")
-    with sp2:
-        persen_cadangan = st.number_input(
-            "Cadangan tabungan rumah (% dari nett)", 0.0, 100.0, 5.0, 0.5,
-            key='persen_cadangan')
+    up_pot = st.file_uploader(
+        "Excel potongan yang sudah diisi (opsional)", type=['xlsx'],
+        key='up_potongan',
+        help="Berkas hasil tombol Unduh Excel di atas, setelah kolom potongan diisi. "
+             "Kalau dikosongkan, semua potongan dianggap nol.")
+
+    bentuk = st.radio(
+        "Pengelompokan berkas di dalam ZIP", ['Folder per cabang', 'ZIP per cabang'],
+        horizontal=True, key='bentuk_zip',
+        help="Folder per cabang: satu ZIP berisi folder KLENDER/, CEGER/, dst. "
+             "ZIP per cabang: satu ZIP berisi KLENDER.zip, CEGER.zip, dst.")
 
     catatan_slip = st.text_area(
         "Catatan yang dicetak di setiap slip", value="", key='catatan_slip',
@@ -1339,8 +1349,9 @@ with st.container():
     if st.button("🧾 Siapkan slip gaji PDF", key='siap_pdf', use_container_width=True):
         with st.spinner("Menyusun slip per cabang..."):
             try:
-                isi, ringkas = buat_zip_slip(jasa_tampil, potongan, persen_cadangan,
-                                             catatan_slip, periode_txt)
+                isi, ringkas = buat_zip_slip(
+                    jasa_tampil, potongan, catatan_slip, periode_txt,
+                    zip_per_cabang=(bentuk == 'ZIP per cabang'))
                 st.session_state['zip_slip'] = isi
                 st.session_state['zip_tag'] = tag_file
                 st.session_state['ringkas_slip'] = ringkas
@@ -1449,8 +1460,8 @@ with st.expander("ℹ️ Cara perhitungan & catatan"):
         f"`JS PROMO LCD 250K - NORMAL`), dipakai **{prioritas} "
         f"{tarif_input[prioritas]:.0f}%** sesuai pilihan prioritas.\n\n"
         "**Periode penggajian** memakai cutoff tanggal 24 s/d 23: gaji bulan M dihitung "
-        "dari 24 bulan (M−2) sampai 23 bulan (M−1). Contoh gaji Mei 2026 = 24 Maret 2026 "
-        "s/d 23 April 2026. Tanggal acuan: **TGL FAKTUR**.\n\n"
+        "dari 24 bulan (M−1) sampai 23 bulan M. Contoh gaji Juli 2026 = 24 Juni 2026 "
+        "s/d 23 Juli 2026. Tanggal acuan: **TGL FAKTUR**.\n\n"
         f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, "
         "tanpa membedakan jenis pekerjaan.\n\n"
         "**Tarif khusus per teknisi** (tabel di panel Pengaturan Tarif) menimpa tarif "
