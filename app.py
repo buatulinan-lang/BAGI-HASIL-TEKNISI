@@ -1902,6 +1902,18 @@ if tab_aktif == 'Bagi Hasil Teknisi':
     st.dataframe(det.head(1000), use_container_width=True, height=360,
                  hide_index=True, key='tabel_detail')
 
+    catatan_mt = ""
+    if pakai_mt_baru and abs(delta_mt) > 1e-12:
+        catatan_mt = (
+            "**Tarif Mati Total berubah sejak "
+            f"{pd.Timestamp(tgl_mt_baru):%d %B %Y}** menjadi {tarif_mt_baru:.1f}% "
+            f"(dari {tarif_input['Mati Total']:.1f}%). Penerapannya dinilai per "
+            "TGL FAKTUR tiap baris, bukan per periode gaji — jadi periode yang "
+            "terbelah tanggal berlaku otomatis terhitung proporsional: faktur "
+            "sebelum tanggal itu memakai tarif lama, sesudahnya tarif baru. "
+            f"Selisih {delta_mt*100:+.1f} poin juga ditambahkan ke teknisi "
+            "bertarif khusus.\n\n")
+
     with st.expander("ℹ️ Cara perhitungan & catatan"):
         st.write(
             "**Tarif bagi hasil** ditentukan dari kata kunci pada kolom NAMA BARANG, "
@@ -1918,16 +1930,8 @@ if tab_aktif == 'Bagi Hasil Teknisi':
             "**Periode penggajian** memakai cutoff tanggal 24 s/d 23: gaji bulan M dihitung "
             "dari 24 bulan (M−1) sampai 23 bulan M. Contoh gaji Juli 2026 = 24 Juni 2026 "
             "s/d 23 Juli 2026. Tanggal acuan: **TGL FAKTUR**.\n\n"
-            ("**Tarif Mati Total berubah sejak "
-         f"{pd.Timestamp(tgl_mt_baru):%d %B %Y}** menjadi {tarif_mt_baru:.1f}% "
-         f"(dari {tarif_input['Mati Total']:.1f}%). Penerapannya dinilai per "
-         "TGL FAKTUR tiap baris, bukan per periode gaji — jadi periode yang "
-         "terbelah tanggal berlaku otomatis terhitung proporsional: faktur "
-         "sebelum tanggal itu memakai tarif lama, sesudahnya tarif baru. "
-         f"Selisih {delta_mt*100:+.1f} poin juga ditambahkan ke teknisi "
-         "bertarif khusus.\n\n") if pakai_mt_baru and abs(delta_mt) > 1e-12 else ""
-        +
-        f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, "
+            + catatan_mt
+        + f"**Pembanding Flat {tarif_flat:.0f}%** = seluruh omzet jasa × {tarif_flat:.0f}%, "
             "tanpa membedakan jenis pekerjaan.\n\n"
             "**Tarif khusus per teknisi** (panel 👥 Tarif Khusus per Teknisi) menimpa tarif "
             "umum hanya untuk kualifikasi yang diisi; kualifikasi yang dikosongkan tetap "
