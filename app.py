@@ -74,7 +74,124 @@ NAMA_SKEMA_A = 'Kategori 1 — persentase omzet'
 NAMA_SKEMA_B = 'Kategori 2 — nominal per unit'
 
 KOL_INSENTIF = ['Insentif Store Leader', 'Insentif Supervisor',
-                'Insentif Front Liner', 'Insentif Team']
+                'Insentif Front Liner', 'Insentif Team',
+                'Insentif Sales Retail']
+
+# --- Sales retail: insentif berjenjang dari omzet penjualan barang -----------
+# Tier dinilai dari total omzet sebulan seorang sales (kolom YANG MENYERAHKAN/
+# MENJUAL), lalu SELURUH omzet dikali persen tier itu — sesuai kolom SIMULASI
+# INSENTIF pada surat penawaran. Bonus handphone & laptop gaming dibayar
+# terpisah di luar tier.
+KATEGORI_JUAL_SALES = (KATEGORI_JUAL_LAPTOP + KATEGORI_JUAL_AKSESORIS
+                       + KATEGORI_JUAL_HP)
+POLA_LAPTOP_GAMING = 'GAMING'
+BONUS_HP_AWAL = 40_000.0
+BONUS_LAPTOP_GAMING_AWAL = 350_000.0
+KOL_TIER_SALES = ['Omzet Minimal', 'Persen']
+
+
+def tier_sales_awal():
+    return pd.DataFrame(
+        [{'Omzet Minimal': 300_000_000.0, 'Persen': 11.0},
+         {'Omzet Minimal': 250_000_000.0, 'Persen': 11.0},
+         {'Omzet Minimal': 200_000_000.0, 'Persen': 10.5},
+         {'Omzet Minimal': 150_000_000.0, 'Persen': 8.5},
+         {'Omzet Minimal': 100_000_000.0, 'Persen': 8.0},
+         {'Omzet Minimal': 75_000_000.0, 'Persen': 7.5},
+         {'Omzet Minimal': 50_000_000.0, 'Persen': 7.0},
+         {'Omzet Minimal': 25_000_000.0, 'Persen': 5.0}],
+        columns=KOL_TIER_SALES)
+
+
+def tier_terpakai(tabel):
+    """DataFrame editor -> daftar (omzet_minimal, persen) urut menurun."""
+    baris = []
+    for _, r in (tabel if tabel is not None else pd.DataFrame()).iterrows():
+        a, p = r.get('Omzet Minimal'), r.get('Persen')
+        if a is None or p is None or pd.isna(a) or pd.isna(p):
+            continue
+        baris.append((float(a), float(p)))
+    return sorted(baris, key=lambda x: -x[0])
+
+
+def persen_tier(omzet, tier):
+    """Persen insentif untuk satu nilai omzet; 0 kalau di bawah tier terendah."""
+    for batas, persen in tier:
+        if omzet >= batas:
+            return persen
+    return 0.0
+
+
+def rekap_sales_retail(df_semua_bulan, tier, bonus_hp, bonus_gaming):
+    """Insentif tiap sales retail + alokasinya ke cabang.
+
+    -> (tabel per sales, Series insentif per cabang)
+    """
+    kosong = pd.DataFrame(columns=[
+        'Nama Sales', 'Cabang', 'Omzet Laptop', 'Omzet Aksesoris',
+        'Omzet Handphone', 'Omzet Tier', 'Persen Tier', 'Insentif Tier',
+        'Unit Handphone', 'Bonus Handphone', 'Unit Laptop Gaming',
+        'Bonus Laptop Gaming', 'Total Insentif Sales'])
+    if not len(df_semua_bulan) or 'PENJUAL' not in df_semua_bulan.columns:
+        return kosong, pd.Series(dtype='float64')
+
+    kj = df_semua_bulan['KAT_JUAL']
+    jual = df_semua_bulan[kj.isin(KATEGORI_JUAL_SALES)].copy()
+    jual = jual[jual['PENJUAL'].astype(str).str.strip() != '']
+    if not len(jual):
+        return kosong, pd.Series(dtype='float64')
+
+    def omzet_per(nama, pola):
+        sub = jual[jual['KAT_JUAL'].isin(pola)]
+        return sub.groupby('PENJUAL')['TOTAL HARGA'].sum().rename(nama)
+
+    t = pd.DataFrame({'Nama Sales': sorted(jual['PENJUAL'].unique())})
+    for nama, pola in [('Omzet Laptop', KATEGORI_JUAL_LAPTOP),
+                       ('Omzet Aksesoris', KATEGORI_JUAL_AKSESORIS),
+                       ('Omzet Handphone', KATEGORI_JUAL_HP)]:
+        t[nama] = t['Nama Sales'].map(omzet_per(nama, pola)).fillna(0.0)
+    t['Omzet Tier'] = t[['Omzet Laptop', 'Omzet Aksesoris',
+                         'Omzet Handphone']].sum(axis=1)
+    t['Persen Tier'] = t['Omzet Tier'].map(lambda o: persen_tier(o, tier))
+    t['Insentif Tier'] = t['Omzet Tier'] * t['Persen Tier'] / 100.0
+
+    hp = jual[jual['KAT_JUAL'].isin(KATEGORI_JUAL_HP)]
+    t['Unit Handphone'] = t['Nama Sales'].map(
+        hp.groupby('PENJUAL')['QTY'].sum()).fillna(0.0)
+    t['Bonus Handphone'] = t['Unit Handphone'] * bonus_hp
+
+    gaming = jual[jual['KAT_JUAL'].isin(KATEGORI_JUAL_LAPTOP)
+                  & jual['BARANG'].astype(str).str.upper()
+                    .str.contains(POLA_LAPTOP_GAMING, na=False)]
+    t['Unit Laptop Gaming'] = t['Nama Sales'].map(
+        gaming.groupby('PENJUAL')['QTY'].sum()).fillna(0.0)
+    t['Bonus Laptop Gaming'] = t['Unit Laptop Gaming'] * bonus_gaming
+
+    t['Total Insentif Sales'] = t[['Insentif Tier', 'Bonus Handphone',
+                                   'Bonus Laptop Gaming']].sum(axis=1)
+    t['Cabang'] = t['Nama Sales'].map(
+        jual.groupby('PENJUAL')['CABANG']
+        .apply(lambda s: ', '.join(sorted(set(s.dropna().astype(str))))))
+
+    # alokasi ke cabang, sebanding omzet sales di tiap cabang
+    porsi = jual.groupby(['PENJUAL', 'CABANG'])['TOTAL HARGA'].sum()
+    total_per_sales = t.set_index('Nama Sales')['Omzet Tier']
+    insentif_sales = t.set_index('Nama Sales')['Total Insentif Sales']
+    per_cabang = {}
+    for (nama, cab), nilai in porsi.items():
+        tot = float(total_per_sales.get(nama, 0.0))
+        if tot <= 0:
+            continue
+        per_cabang[cab] = per_cabang.get(cab, 0.0) + \
+            float(insentif_sales.get(nama, 0.0)) * float(nilai) / tot
+
+    t = t[['Nama Sales', 'Cabang', 'Omzet Laptop', 'Omzet Aksesoris',
+           'Omzet Handphone', 'Omzet Tier', 'Persen Tier', 'Insentif Tier',
+           'Unit Handphone', 'Bonus Handphone', 'Unit Laptop Gaming',
+           'Bonus Laptop Gaming', 'Total Insentif Sales']]
+    t = t.sort_values('Total Insentif Sales',
+                      ascending=False).reset_index(drop=True)
+    return t, pd.Series(per_cabang, dtype='float64')
 
 
 def daftar_bulan(tgl_min, tgl_max):
@@ -103,7 +220,8 @@ def label_bulan(tahun, bulan):
     return f"{BULAN_NAMES[bulan]} {tahun} (1–{akhir.day} {BULAN_NAMES[bulan]})"
 
 
-def rekap_insentif(df_jasa_bulan, df_semua_bulan, persen, skema, tarif_skema):
+def rekap_insentif(df_jasa_bulan, df_semua_bulan, persen, skema, tarif_skema,
+                   insentif_sales_cabang=None):
     """Rekap insentif seluruh peran per cabang untuk satu bulan kalender.
 
     skema: NAMA_SKEMA_A (persen omzet) atau NAMA_SKEMA_B (nominal per unit).
@@ -162,6 +280,12 @@ def rekap_insentif(df_jasa_bulan, df_semua_bulan, persen, skema, tarif_skema):
     t['Insentif Front Liner'] = t[['FL Aksesoris', 'FL Laptop',
                                    'FL Handphone']].sum(axis=1)
 
+    if insentif_sales_cabang is None or not len(insentif_sales_cabang):
+        t['Insentif Sales Retail'] = 0.0
+    else:
+        t['Insentif Sales Retail'] = t['Cabang'].map(
+            insentif_sales_cabang).fillna(0.0)
+
     t['Total Insentif'] = t[KOL_INSENTIF].sum(axis=1)
     t['Gross Profit Awal'] = t['Omzet Total'] - t['HPP'] - t['Bagi Hasil Teknisi']
     t['Gross Profit Setelah Insentif'] = t['Gross Profit Awal'] - t['Total Insentif']
@@ -178,6 +302,7 @@ KOL_TAMPIL_INSENTIF = [
     'Omzet Penjualan Handphone', 'Unit Penjualan Handphone', 'FL Handphone',
     'Insentif Front Liner',
     'Omzet Jasa', 'Insentif Team',
+    'Insentif Sales Retail',
     'Total Insentif',
     'Omzet Total', 'HPP', 'Bagi Hasil Teknisi',
     'Gross Profit Awal', 'Gross Profit Setelah Insentif', 'Penurunan GP %',
@@ -438,7 +563,7 @@ SALES_REQUIRED = ['TGL FAKTUR', 'NO FAKTUR', 'KATEGORI BARANG', 'NAMA BARANG',
                   'QTY', 'TOTAL HARGA']          # CABANG boleh datang dari nama berkas
 KOLOM_DIPAKAI = SALES_REQUIRED + ['CABANG', 'NAMA TEKNISI', 'NAMA TEKNISI (FINAL)',
                                  'KERUSAKAN UTAMA', 'KATEGORI PENJUALAN',
-                                 'HARGA BELI']
+                                 'HARGA BELI', 'YANG MENYERAHKAN/MENJUAL']
 # NO FAKTUR hanya unik DI DALAM satu cabang (nomor MF-FP.xxxx dipakai ulang di
 # cabang lain), jadi kunci duplikat wajib menyertakan CABANG. Baris kembar di
 # dalam satu berkas tetap dipertahankan — yang dibuang hanya kiriman ulang.
@@ -648,7 +773,8 @@ def bersihkan(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
     for asal, baru in [('KERUSAKAN UTAMA', 'KERUSAKAN'),
-                       ('KATEGORI PENJUALAN', 'KAT_JUAL')]:
+                       ('KATEGORI PENJUALAN', 'KAT_JUAL'),
+                       ('YANG MENYERAHKAN/MENJUAL', 'PENJUAL')]:
         df[baru] = (df[asal].astype(str).str.replace(r'\s+', ' ', regex=True)
                     .str.strip().str.upper().fillna('')
                     if asal in df.columns else '')
@@ -1129,6 +1255,17 @@ with st.sidebar.expander("💼 Pengaturan insentif", expanded=False):
         tarif_skema['Handphone'] = st.number_input(
             "Penjualan handphone (Rp / unit)", 0.0, 10_000_000.0,
             SKEMA_B_AWAL['Handphone'], 5_000.0, key='ins_fl_hp_n')
+
+    st.divider()
+    st.markdown("**Sales Retail** — bonus terpisah")
+    bonus_hp = st.number_input(
+        "Bonus handphone (Rp / unit)", 0.0, 10_000_000.0, BONUS_HP_AWAL,
+        5_000.0, key='ins_bonus_hp')
+    bonus_gaming = st.number_input(
+        "Bonus laptop gaming (Rp / unit)", 0.0, 50_000_000.0,
+        BONUS_LAPTOP_GAMING_AWAL, 25_000.0, key='ins_bonus_gaming',
+        help="Dikenali dari NAMA BARANG yang memuat kata GAMING pada channel "
+             "Penjualan Laptop.")
 
 if skema_fl == NAMA_SKEMA_A:
     ket_skema = (f"laptop {tarif_skema['Laptop']:g}% · handphone "
@@ -1990,8 +2127,38 @@ else:
         st.warning("Tidak ada transaksi pada bulan tersebut.")
         st.stop()
 
+    with st.expander("⚙️ Tier insentif Sales Retail — bisa diubah, tambah, hapus",
+                     expanded=False):
+        st.caption(
+            "Tier dinilai dari **total omzet sebulan seorang sales** (Penjualan "
+            "Laptop + Aksesoris + Handphone, kolom YANG MENYERAHKAN/MENJUAL). "
+            "Persen tier lalu dikalikan ke **seluruh omzet** itu, sesuai kolom "
+            "SIMULASI INSENTIF di surat penawaran. Omzet di bawah tier terendah "
+            "tidak dapat insentif tier. Bonus handphone & laptop gaming dibayar "
+            "terpisah, diatur di sidebar.")
+        if 'tabel_tier' not in st.session_state:
+            st.session_state['tabel_tier'] = tier_sales_awal()
+        tabel_tier = st.data_editor(
+            st.session_state['tabel_tier'], key='ed_tier', num_rows='dynamic',
+            use_container_width=True, hide_index=False,
+            column_config={
+                'Omzet Minimal': st.column_config.NumberColumn(
+                    'Omzet minimal (Rp)', min_value=0.0, step=5_000_000.0,
+                    format='%.0f'),
+                'Persen': st.column_config.NumberColumn(
+                    'Persen insentif (%)', min_value=0.0, max_value=100.0,
+                    step=0.5, format='%.1f')})
+        if st.button("↩️ Kembalikan tier awal", key='reset_tier'):
+            st.session_state['tabel_tier'] = tier_sales_awal()
+            st.session_state.pop('ed_tier', None)
+            st.rerun()
+
+    tier = tier_terpakai(tabel_tier)
+    sales, sales_cabang = rekap_sales_retail(sel_semua, tier, bonus_hp,
+                                             bonus_gaming)
+
     ins = rekap_insentif(sel_jasa, sel_semua, persen_insentif, skema_fl,
-                         tarif_skema)
+                         tarif_skema, sales_cabang)
     tot = {k: float(ins[k].sum()) for k in KOL_INSENTIF}
     total_ins = float(ins['Total Insentif'].sum())
     gp_awal = float(ins['Gross Profit Awal'].sum())
@@ -2023,6 +2190,10 @@ else:
          'sub': f"{persen_insentif['Team']:g}% dari omzet jasa "
                 f"{rp(ins['Omzet Jasa'].sum())}",
          'grad': 'linear-gradient(135deg,#7c3aed,#a855f7)'},
+        {'label': 'Sales Retail', 'value': rp(tot['Insentif Sales Retail']),
+         'sub': f"{int((sales['Total Insentif Sales'] > 0).sum()) if len(sales) else 0}"
+                f" dari {len(sales)} sales dapat insentif",
+         'grad': 'linear-gradient(135deg,#c9392f,#e0475a)'},
     ]), unsafe_allow_html=True)
     st.write("")
 
@@ -2037,6 +2208,7 @@ else:
         {'Pos': 'Insentif Supervisor', 'Nilai': -tot['Insentif Supervisor']},
         {'Pos': 'Insentif Front Liner', 'Nilai': -tot['Insentif Front Liner']},
         {'Pos': 'Insentif Team', 'Nilai': -tot['Insentif Team']},
+        {'Pos': 'Insentif Sales Retail', 'Nilai': -tot['Insentif Sales Retail']},
         {'Pos': 'Gross Profit Setelah Insentif', 'Nilai': gp_akhir},
     ])
     ringkas['% dari omzet'] = (ringkas['Nilai'].abs() / omzet_total * 100
@@ -2049,11 +2221,14 @@ else:
             key='tabel_gp_ringkas')
     with r2:
         figk = px.pie(
-            names=['Store Leader', 'Supervisor', 'Front Liner', 'Team'],
+            names=['Store Leader', 'Supervisor', 'Front Liner', 'Team',
+                   'Sales Retail'],
             values=[tot['Insentif Store Leader'], tot['Insentif Supervisor'],
-                    tot['Insentif Front Liner'], tot['Insentif Team']],
+                    tot['Insentif Front Liner'], tot['Insentif Team'],
+                    tot['Insentif Sales Retail']],
             hole=0.55,
-            color_discrete_sequence=['#2e9bd6', '#7c3aed', '#e0921f', '#12a89e'])
+            color_discrete_sequence=['#2e9bd6', '#7c3aed', '#e0921f', '#12a89e',
+                                     '#c9392f'])
         figk.update_traces(textinfo='label+percent')
         figk.update_layout(height=350, margin=dict(l=5, r=5, t=25, b=5),
                            showlegend=False,
@@ -2064,7 +2239,8 @@ else:
     st.markdown("#### Insentif per Cabang menurut Peran")
     c = ins.sort_values('Total Insentif')
     warna = {'Insentif Store Leader': '#2e9bd6', 'Insentif Supervisor': '#7c3aed',
-             'Insentif Front Liner': '#e0921f', 'Insentif Team': '#12a89e'}
+             'Insentif Front Liner': '#e0921f', 'Insentif Team': '#12a89e',
+             'Insentif Sales Retail': '#c9392f'}
     fig = go.Figure()
     for kol in KOL_INSENTIF:
         fig.add_bar(y=c['Cabang'], x=c[kol], orientation='h',
@@ -2156,6 +2332,14 @@ else:
             f"- **Front Liner** = aksesoris × "
             f"{persen_insentif['Front Liner Aksesoris']:g}%, ditambah laptop & "
             f"handphone menurut skema terpilih ({ket_skema})\n\n"
+            f"- **Sales Retail** = tier berjenjang dari total omzet sebulan tiap "
+            "sales (kolom YANG MENYERAHKAN/MENJUAL), mencakup Penjualan Laptop + "
+            "Aksesoris + Handphone. Persen tier dikalikan ke **seluruh** omzet "
+            "itu, sesuai kolom SIMULASI INSENTIF di surat penawaran. Ditambah "
+            f"bonus terpisah handphone {rp(bonus_hp, False)}/unit dan laptop "
+            f"gaming {rp(bonus_gaming, False)}/unit (dikenali dari kata GAMING "
+            "pada nama barang). Pada tabel per cabang, insentif tiap sales "
+            "dibagi ke cabang sebanding omzetnya di cabang itu.\n\n"
             "**Sumber baris penjualan** memakai kolom KATEGORI PENJUALAN: "
             "`Penjualan Aksesoris`, `Penjualan Laptop`, serta `Penjualan HP` dan "
             "`Penjualan Handphone` yang digabung sebagai handphone. Seluruh baris "
@@ -2167,5 +2351,5 @@ else:
             "QTY lagi. Angka ini belum dikurangi biaya operasional lain, jadi bukan "
             "laba bersih.\n\n"
             "**Gross Profit Setelah Insentif** = Gross Profit Awal − total insentif "
-            "keempat peran."
+            "kelima peran."
         )

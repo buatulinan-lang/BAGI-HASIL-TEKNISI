@@ -1,99 +1,97 @@
-# Dashboard Bagi Hasil Teknisi
+# Bagi Hasil Teknisi — V2
 
-Aplikasi **berdiri sendiri** (terpisah dari dashboard servis/penjualan) untuk
-menghitung omzet jasa per teknisi beserta bagi hasilnya.
+Versi pengembangan. **V1** adalah versi produksi yang sudah dipakai dan tidak
+diubah lagi: repo [BAGI-HASIL-TEKNISI](https://github.com/buatulinan-lang/BAGI-HASIL-TEKNISI),
+app <https://bagi-hasil-teknisi.streamlit.app>.
 
-## Isi dashboard
+| | V1 | V2 |
+|---|---|---|
+| Status | produksi, beku | pengembangan |
+| Repo | BAGI-HASIL-TEKNISI | BAGI-HASIL-TEKNISI-V2 |
+| Perubahan baru | tidak ada | semua di sini |
 
-- **KPI**: omzet jasa, bagi hasil menurut aturan, pembanding flat, selisih,
-  jumlah teknisi, dan omzet yang belum bernama teknisi
-- **Rekap per Teknisi & Cabang** — tabel utama, bisa dicari, bisa diunduh
-- **Rekap per Cabang**
-- **Grafik 15 teratas**: aturan vs pembanding
-- **Komposisi omzet per tarif**
-- **Detail transaksi jasa**
+Judul app dan sidebar menampilkan penanda **V2** supaya tidak tertukar saat
+keduanya dibuka bersamaan di browser.
 
-## 1. Install (sekali saja)
+## Jalankan lokal
 
 ```bash
 pip install -r requirements.txt
-```
-
-## 2. Jalankan
-
-```bash
 streamlit run app.py
 ```
 
-Browser terbuka otomatis ke `http://localhost:8501`.
+## Isi repo
 
-## 3. Data
-
-Aplikasi membaca `data/penjualan.csv.gz` secara otomatis. Kalau mau memakai
-file lain, upload lewat panel kiri (mendukung `.xlsx` satu sheet per cabang,
-`.csv`, atau `.csv.gz`).
-
-Kolom yang dibutuhkan: `TGL FAKTUR`, `NO FAKTUR`, `KATEGORI BARANG`,
-`NAMA BARANG`, `NAMA TEKNISI (FINAL)` (atau `NAMA TEKNISI`), `QTY`,
-`TOTAL HARGA`, dan `CABANG`.
-
-Hanya baris berkategori **JASA** yang dihitung.
-
-## 4. Aturan bagi hasil
-
-Tarif ditentukan dari kata kunci pada kolom **NAMA BARANG**:
-
-| Kata kunci pada nama barang | Tarif awal |
+| Berkas | Keterangan |
 |---|---|
-| mengandung **Interface** | 20% |
-| mengandung **Normal** | 30% |
-| mengandung **Mati Total** | 32% |
-| mengandung **Promo** | 60% |
-| tidak mengandung kata kunci mana pun | 30% |
+| `app.py` | seluruh aplikasi (satu berkas) |
+| `assets/` | logo Madinah Group & MFlash untuk slip PDF |
+| `data/penjualan.csv.gz` | data bawaan (gabungan 18 cabang, Jan–Agu 2026); bisa diganti lewat uploader di sidebar |
 
-Semua angka di atas **bisa diubah manual** lewat panel
-**⚙️ Pengaturan Tarif Bagi Hasil** di dashboard — termasuk tarif pembanding
-dan penentuan mana yang menang bila satu nama mengandung dua kata kunci
-(contoh: `JS PROMO LCD 250K - NORMAL`).
+## Yang sudah ada (diwarisi dari V1)
 
-## 5. Periode penggajian (cutoff 24 → 23)
+- Upload banyak berkas sekaligus, satu kiriman per cabang; nama cabang dideteksi dari
+  kolom CABANG → nama sheet → nama berkas, dengan isian manual sebagai cadangan.
+- Pembuangan kiriman ulang (duplikat antar berkas), aman terhadap nomor faktur yang
+  dipakai ulang di cabang berbeda.
+- Periode penggajian cutoff 24 s/d 23: gaji bulan M = 24 bulan (M−1) s/d 23 bulan M.
+- Tarif bagi hasil per kualifikasi (Interface / Normal / Mati Total / Promo / Lainnya)
+  plus tabel tarif khusus per teknisi.
+- Pengecualian jasa tertentu (bawaan: oper gadget).
+- Acuan KERUSAKAN UTAMA untuk cabang yang penamaan barangnya belum berkata kunci.
+- Unduhan Excel multi-sheet (rekap + satu sheet per cabang, lengkap kolom penggajian).
+- Unduhan slip gaji PDF: satu berkas per teknisi, dikumpulkan per cabang dalam ZIP.
 
-Gaji bulan M dihitung dari **24 bulan (M−2)** sampai **23 bulan (M−1)**.
+## Tambahan V2
 
-| Bulan gaji | Periode dihitung |
+### Tab Insentif Non-Teknisi
+
+Tab terpisah dari dashboard bagi hasil — pilih di sidebar, bagian **🗂️ Tab**.
+Periode memakai **bulan kalender** (tanggal 1 s/d akhir bulan), berbeda dari bagi
+hasil teknisi yang memakai cutoff 24–23.
+
+| Peran | Dasar | Bawaan |
+|---|---|---|
+| Store Leader | omzet jasa *Mati Total* | 3% |
+| Supervisor | omzet jasa *Mati Total* | 1% |
+| Team | seluruh omzet jasa cabang | 2% |
+| Front Liner — aksesoris | channel *Penjualan Aksesoris* | 5% |
+| Front Liner — laptop & HP | dua skema pilihan | 3%/2% atau Rp 50rb/Rp 30rb per unit |
+| **Sales Retail** | tier dari omzet sebulan per orang | lihat di bawah |
+
+#### Sales Retail
+
+Dikelompokkan per nama pada kolom **YANG MENYERAHKAN/MENJUAL**. Omzet yang
+menentukan tier = Penjualan Laptop + Aksesoris + Handphone dalam satu bulan,
+lalu **seluruh omzet itu** dikali persen tier (sesuai kolom SIMULASI INSENTIF
+pada surat penawaran).
+
+| Omzet minimal | Persen |
 |---|---|
-| Mei 2026 | 24 Maret – 23 April 2026 |
-| Juni 2026 | 24 April – 23 Mei 2026 |
-| Juli 2026 | 24 Mei – 23 Juni 2026 |
+| 300.000.000 | 11,0% |
+| 250.000.000 | 11,0% |
+| 200.000.000 | 10,5% |
+| 150.000.000 | 8,5% |
+| 100.000.000 | 8,0% |
+| 75.000.000 | 7,5% |
+| 50.000.000 | 7,0% |
+| 25.000.000 | 5,0% |
 
-Tanggal acuannya adalah **TGL FAKTUR**.
+Tabel tier bisa diubah, ditambah, atau dikurangi dari dalam tab. Di bawah tier
+terendah tidak dapat insentif tier.
 
-## 6. Berkas unduhan
+Bonus terpisah (diatur di sidebar): **handphone Rp 40.000/unit** dan **laptop
+gaming Rp 350.000/unit** — laptop gaming dikenali dari kata `GAMING` pada NAMA
+BARANG di channel Penjualan Laptop.
 
-Tersedia tiga tombol unduh CSV:
+Pada tabel per cabang, insentif tiap sales dibagi ke cabang sebanding omzetnya di
+cabang tersebut, karena sebagian sales menjual di lebih dari satu cabang.
 
-1. **Rekap per Teknisi & Cabang** — kolom: `Nama Teknisi`, `Cabang`,
-   `Bagi Hasil (Aturan)`, `Omzet Jasa`, `Pembanding`, `Selisih`, `Baris`,
-   `Efektif %`
-2. **Rekap per Teknisi (digabung semua cabang)** — kolom: `Nama Teknisi`,
-   `Cabang` (daftar cabang tempat ia bekerja), `Bagi Hasil (Aturan)`,
-   `Omzet Jasa`, `Pembanding`, `Selisih`
-3. **Rekap per Cabang**
+**Gross Profit** = omzet seluruh kategori − HPP − bagi hasil teknisi.
+HPP diambil dari kolom `HARGA BELI`, yang pada data ini **sudah berupa total per
+baris** (bukan harga satuan) sehingga tidak dikalikan QTY lagi. Angka ini belum
+dikurangi biaya operasional lain, jadi bukan laba bersih.
 
-Nama berkas otomatis memuat periode gajinya, misalnya
-`bagi_hasil_teknisi_cabang_gaji-2026-09.csv`.
+### Rencana berikutnya
 
-## Catatan penting
-
-Sebagian teknisi (33 dari 170 pada data saat ini) bekerja di **lebih dari satu
-cabang**. Karena itu rekap utama dipecah per teknisi **per cabang**, supaya
-bagi hasilnya bisa dibebankan ke cabang yang tepat. Bila butuh angka gabungan
-per orang, gunakan tombol unduh yang kedua.
-
-Penamaan barang berkata kunci (`JS ... - INTERFACE`, dst.) baru mulai dipakai
-sekitar **Juli 2026**. Untuk periode sebelumnya semua item memakai penamaan
-lama (`JASA REPAIR`, `JASA BATERAI`, ...) sehingga seluruhnya kena tarif
-tanpa-kata-kunci — dashboard akan menampilkan peringatan bila itu terjadi.
-
-Angka yang dihitung adalah **omzet jasa (TOTAL HARGA)**, belum dikurangi biaya
-apa pun.
+_(belum ada)_
